@@ -112,3 +112,108 @@ class BatchLinear(Module):
         
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
+    
+
+
+class AnchoredBatch(Module):
+    """
+    Args:
+        ensemble_size: size of ensemble
+        in_featuers: input dimension
+        out_features: output dimension
+        bias: If set to ``False``, the layer will not learn an additive bias.
+            Default: ``True``
+    """
+    __constants__ = ['ensemble_size', 'in_features', 'out_features']
+    ensemble_size: int
+    in_features: int
+    out_features: int
+    weight: Tensor
+
+    def __init__(self,ensemble_size: int , in_features: int, out_features: int, bias: bool = True,
+                 device=None, dtype=None) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        # Ensemble Size
+        self.ensemble_size = ensemble_size
+        # Input Dimension
+        self.in_features = in_features
+        # Output Dimension
+        self.out_features = out_features
+
+        # Prior mean
+        self.mean = 0
+
+        # Prior standard deviation, will be calculatedin reset_parameters()
+        self.std = 0
+
+        # Initalize the anchor points for each ensemble member
+        self.anchors = torch.zeros(self.ensemble_size, self.out_features, self.in_features)
+
+        # Initiate the Shared Weight Matrix
+        self.weight = Parameter(torch.empty((in_features, out_features), **factory_kwargs))
+        
+        # Initiate the Fast Weights
+        self.r = Parameter(torch.empty((ensemble_size, in_features, 1), **factory_kwargs)) 
+        self.s = Parameter(torch.empty((ensemble_size, out_features, 1), **factory_kwargs)) 
+        if bias:
+            self.bias = Parameter(torch.empty((ensemble_size, out_features), **factory_kwargs))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+        self.set_anchors()
+
+    def reset_parameters(self) -> None:
+        '''
+        Instead of using Kaiming Uniform initailization which is default for Linear module we instead use Kaiming Normal.
+        This allows us to use the mean and standard deviation of the weight initialization as our prior for our anchored ensemble.  
+        '''
+        init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
+
+        # Calculate the standard deviation 
+        fan = init._calculate_correct_fan(self.weight, mode='fan_out')
+        gain = init.calculate_gain(nonlinearity='relu')
+        self.std = gain / math.sqrt(fan)
+        # Initialize r and s vectors with same parameters as the weight matrix
+        with torch.no_grad():
+            self.r.normal_(0, self.std)
+            self.s.normal_(0, self.std)
+
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            init.uniform_(self.bias, -bound, bound)
+        
+    def set_anchors(self):
+        # Draw anchor points for each ensemble member using the prior mean and std
+        for ensemble_index in range(self.ensemble_size):
+            self.anchors[ensemble_index] = torch.normal(mean=self.mean, std = self.std, size =(self.out_features, self.in_features))
+
+    def forward(self, input: Tensor) -> Tensor:
+        # Calculate the batch size
+        batch_size = input.shape[0]//self.ensemble_size
+
+        # Initiate a matrix Y were the results will be stored, will have dimensions B*M x n
+        Y = torch.zeros(batch_size*self.ensemble_size, self.out_features, device=input.device)
+
+        # Iterate through the data of each ensemble member
+        for i, ri, si in zip(range(self.ensemble_size), self.r, self.s):
+            # Define matrices R and S whose rows consist of vectors ri and si for all points in mini-batch
+            R = ri.flatten().repeat(batch_size,1)
+            S = si.flatten().repeat(batch_size,1)
+
+            # Define indeces for accessing each ensemble member's mini batch
+            start_idx = i * batch_size
+            end_idx = (i+1) * batch_size
+
+            # Access corresponding mini batch of ensemble member i
+            X = input[start_idx:end_idx]
+
+            # Compute the forward pass using Equation 5 of BatchEnsemble
+            Y[start_idx:end_idx] = torch.mm((X*R), self.weight) * S
+            if self.bias is not None:
+                Y[start_idx:end_idx] += self.bias[i]
+        return Y
+        
+    def extra_repr(self) -> str:
+        return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
