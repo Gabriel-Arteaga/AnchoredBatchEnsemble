@@ -207,7 +207,7 @@ class AnchoredBatch(Module):
         self.anchors = torch.empty((self.ensemble_size, self.in_features, self.out_features), **factory_kwargs)
 
         # Initiate the Shared Weight Matrix
-        self.weight = torch.empty((in_features, out_features), **factory_kwargs) # Train shared as well
+        self.weight = Parameter(torch.empty((in_features, out_features), **factory_kwargs)) # Train shared as well
         
         # Initiate the Fast Weights
         self.r = Parameter(torch.empty((ensemble_size, in_features, 1), **factory_kwargs)) 
