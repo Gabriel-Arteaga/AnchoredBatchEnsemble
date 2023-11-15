@@ -4,6 +4,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 from torch.nn import init
 import math
+from torch.nn import functional as F
 
 class BatchLinear(Module):
     """Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
