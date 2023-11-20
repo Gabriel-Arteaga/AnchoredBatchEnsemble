@@ -65,8 +65,8 @@ class BatchLinear(Module):
         self.weight = Parameter(torch.empty((in_features, out_features), **factory_kwargs))
         
         # Initiate the Fast Weights
-        self.r = Parameter(torch.empty((ensemble_size, in_features, 1), **factory_kwargs)) 
-        self.s = Parameter(torch.empty((ensemble_size, out_features, 1), **factory_kwargs)) 
+        self.r = Parameter(torch.empty((ensemble_size, in_features), **factory_kwargs)) 
+        self.s = Parameter(torch.empty((ensemble_size, out_features), **factory_kwargs)) 
         if bias:
             self.bias = Parameter(torch.empty((ensemble_size, out_features), **factory_kwargs))
         else:
@@ -89,27 +89,18 @@ class BatchLinear(Module):
         # Calculate the batch size
         batch_size = input.shape[0]//self.ensemble_size
 
-        # Initiate a matrix Y were the results will be stored, will have dimensions B*M x n
-        Y = torch.zeros(batch_size*self.ensemble_size, self.out_features, device=input.device)
+        # Repeat the fast weights so that it fits the batch_size appropritaely
+        R = self.r.repeat_interleave(batch_size,dim=0)
+        S = self.s.repeat_interleave(batch_size,dim=0)
 
-        # Iterate through the data of each ensemble member
-        for i, ri, si in zip(range(self.ensemble_size), self.r, self.s):
-            # Define matrices R and S whose rows consist of vectors ri and si for all points in mini-batch
-            R = ri.flatten().repeat(batch_size,1)
-            S = si.flatten().repeat(batch_size,1)
+        # Perform the forward pass according to Equation 5 in BatchEnsemble
+        output = torch.mm((input*R), self.weight) * S
 
-            # Define indeces for accessing each ensemble member's mini batch
-            start_idx = i * batch_size
-            end_idx = (i+1) * batch_size
-
-            # Access corresponding mini batch of ensemble member i
-            X = input[start_idx:end_idx]
-
-            # Compute the forward pass using Equation 5 of BatchEnsemble
-            Y[start_idx:end_idx] = torch.mm((X*R), self.weight) * S
-            if self.bias is not None:
-                Y[start_idx:end_idx] += self.bias[i]
-        return Y
+        # If bias, add it to the output
+        if self.bias is not None:
+            bias = self.bias.repeat_interleave(batch_size, dim=0)
+            output += bias
+        return output
         
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
@@ -210,8 +201,8 @@ class AnchoredBatch(Module):
         self.weight = Parameter(torch.empty((in_features, out_features), **factory_kwargs)) # Train shared as well
         
         # Initiate the Fast Weights
-        self.r = Parameter(torch.empty((ensemble_size, in_features, 1), **factory_kwargs)) 
-        self.s = Parameter(torch.empty((ensemble_size, out_features, 1), **factory_kwargs)) 
+        self.r = Parameter(torch.empty((ensemble_size, in_features), **factory_kwargs)) 
+        self.s = Parameter(torch.empty((ensemble_size, out_features), **factory_kwargs)) 
         if bias:
             self.bias = Parameter(torch.empty((ensemble_size, out_features), **factory_kwargs))
         else:
@@ -249,27 +240,18 @@ class AnchoredBatch(Module):
         # Calculate the batch size
         batch_size = input.shape[0]//self.ensemble_size
 
-        # Initiate a matrix Y were the results will be stored, will have dimensions B*M x n
-        Y = torch.zeros(batch_size*self.ensemble_size, self.out_features, device=input.device)
+        # Repeat the fast weights so that it fits the batch_size appropritaely
+        R = self.r.repeat_interleave(batch_size,dim=0)
+        S = self.s.repeat_interleave(batch_size,dim=0)
 
-        # Iterate through the data of each ensemble member
-        for i, ri, si in zip(range(self.ensemble_size), self.r, self.s):
-            # Define matrices R and S whose rows consist of vectors ri and si for all points in mini-batch
-            R = ri.flatten().repeat(batch_size,1)
-            S = si.flatten().repeat(batch_size,1)
+        # Perform the forward pass according to Equation 5 in BatchEnsemble
+        output = torch.mm((input*R), self.weight) * S
 
-            # Define indeces for accessing each ensemble member's mini batch
-            start_idx = i * batch_size
-            end_idx = (i+1) * batch_size
-
-            # Access corresponding mini batch of ensemble member i
-            X = input[start_idx:end_idx]
-
-            # Compute the forward pass using Equation 5 of BatchEnsemble
-            Y[start_idx:end_idx] = torch.mm((X*R), self.weight) * S
-            if self.bias is not None:
-                Y[start_idx:end_idx] += self.bias[i]
-        return Y
+        # If bias, add it to the output
+        if self.bias is not None:
+            bias = self.bias.repeat_interleave(batch_size, dim=0)
+            output += bias
+        return output
     
     def get_reg_term(self, N: int, data_noise: float):
         """
@@ -281,10 +263,17 @@ class AnchoredBatch(Module):
         tau = data_noise/self.std 
         normalization_term = 1/N 
 
-        reg_term = 0
-        # Iterate through each ensemble member and compute the regularization
-        for i in range(self.ensemble_size):
-            reg_term += normalization_term*tau*torch.mul(self.weight*(self.r[i]@self.s[i].T)-self.anchors[i],self.weight*(self.r[i]@self.s[i].T)-self.anchors[i]).sum()
+        # Reshape r, (ensemble_size, input_size) -> (ensemble_size, input_size, 1)
+        r = self.r.unsqueeze(2)
+        # Reshape r, (ensemble_size, output_size) -> (ensemble_size, output_size, 1)
+        s = self.s.unsqueeze(2)
+        # Take the transpose of s, (ensemble_size, output_size, 1) -> (ensemble_size, 1, output_size)
+        s_transpose = s.transpose(-2, -1)
+        # Compute the norm argument 
+        norm_arg = (self.weight * torch.bmm(r, s_transpose) - self.anchors).pow(2)
+        
+        # Compute the regulariztation term
+        reg_term = (normalization_term * tau * norm_arg).sum()
         return reg_term
 
     def extra_repr(self) -> str:
