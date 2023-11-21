@@ -2,7 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Union
+from typing import Union, Optional
 import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -106,13 +106,16 @@ def train_models(
     ensemble_type: str,
     ensemble_size: int,
     data_noise: float,
-    learning_rate: float,
     epochs: int,
     print_frequency: int,
-    data_loader: torch.utils.data.DataLoader,
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    device: torch.device = device) -> None:
+    train_loader: torch.utils.data.DataLoader,
+    test_loader: Optional[torch.utils.data.DataLoader],
+    test: bool=False,
+    learning_rate: float=0.001,
+    weight_decay: Optional[float]=None,
+    device: torch.device = device) -> Union[None, float]:
     """
     Train neural network models using various ensemble strategies.
 
@@ -121,25 +124,31 @@ def train_models(
         ensemble_type (str): The ensemble strategy ('batch', 'anchored_batch', 'naive').
         ensemble_size (int): Number of ensemble members (relevant for 'batch' and 'anchored_batch' ensembles).
         data_noise (float): Magnitude of noise to be added to the data for 'anchored_batch' ensemble.
-        learning_rate (float): Learning rate for optimization.
         epochs (int): Number of training epochs.
         print_frequency (int): Frequency of printing training progress.
-        data_loader (torch.utils.data.DataLoader): DataLoader providing training data.
         loss_fn (torch.nn.Module): Loss function for optimization.
         optimizer (torch.optim.Optimizer): Optimizer for updating model parameters.
+        train_loader (torch.utils.data.DataLoader): DataLoader providing training data.
+        test_loader (Optional[torch.utils.data.DataLoader]): DataLoader providing test data (default is None).
+        test (bool): True or False, Shall we measure test 
+        learning_rate (float): Learning rate for optimization.
         device (torch.device, optional): Device for training (default is device).
 
     Returns:
-        None
+         Union[None, float]: If test is False or test_loader is None, returns None. 
+                           If test is True and test_loader is provided, returns the average test loss.
     """
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
-        optimizer = optimizer(model.parameters(), lr = learning_rate)
+        if weight_decay == None:
+            optimizer = optimizer(model.parameters(),lr=learning_rate)
+        else:
+            optimizer = optimizer(model.parameters(),lr=learning_rate, weight_decay=weight_decay)
         model.to(device)
         for epoch in range(epochs):
             # Training
             train_loss = 0
             # Add a loop to loop through the training batches
-            for batch, (X, y) in enumerate(data_loader):
+            for batch, (X, y) in enumerate(train_loader):
                 model.train()
                 # 1. Perform forward pass
                 y_pred = model(X.repeat(ensemble_size,1)) # Make prediction
@@ -169,6 +178,21 @@ def train_models(
             if epoch%print_frequency == 0:
                 print(f"Epoch: {epoch}\n-------")
                 print("Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
+            # Evaluation on test data
+        
+        if test and test_loader is not None:
+            model.eval()
+            test_loss = 0
+            with torch.no_grad():
+                for batch, (X_test, y_test) in enumerate(test_loader):
+                    y_pred_test = model(X_test.repeat(ensemble_size, 1))
+                    test_loss += loss_fn(y_pred_test, y_test.repeat(ensemble_size, 1)).item()
+
+            average_test_loss = test_loss / (batch + 1)
+            print(f"\nEvaluation on Test Data\n------------------------")
+            print("Average Test Loss:", average_test_loss)
+            
+            return average_test_loss
     
     if ensemble_type == 'naive':
         # If naive there are several models we need to sequentially train
@@ -182,7 +206,7 @@ def train_models(
                 # Training
                 train_loss = 0
                 # Add a loop to loop through the training batches
-                for batch, (X, y) in enumerate(data_loader):
+                for batch, (X, y) in enumerate(train_loader):
                     model.train()
                     # 1. Perform forward pass
                     y_pred = model(X) # Make prediction
@@ -204,7 +228,23 @@ def train_models(
                     print(f"Epoch: {epoch}\n-------")
                     print("Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
 
-            
+        # Evaluation on test data for each model
+        if test and test_loader is not None:
+            test_loss = 0
+            for Model in model:
+                Model.eval()
+                Model_test_loss = 0
+                with torch.no_grad():
+                    for batch, (X_test, y_test) in enumerate(test_loader):
+                        y_pred_test = Model(X_test)
+                        Model_test_loss += loss_fn(y_pred_test, y_test).item()
+                    average_test_loss += Model_test_loss/ (batch+1)
+            average_test_loss /= ensemble_size
+            print(f"\nEvaluation on Test Data\n------------------------")
+            print("Average Test Loss:", average_test_loss)
+                
+            return average_test_loss
+
 
 
 def train_models_w_mean_var(
@@ -215,10 +255,10 @@ def train_models_w_mean_var(
     learning_rate: float,
     epochs: int,
     print_frequency: int,
-    data_loader: torch.utils.data.DataLoader,
+    test_loader: torch.utils.data.DataLoader,
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    device: torch.device = device) -> None:
+    device: torch.device = device) -> Union[None, float]:
     """
     Train neural network models using various ensemble strategies.
 
