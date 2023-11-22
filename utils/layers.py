@@ -74,12 +74,17 @@ class BatchLinear(Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
-        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
-        # https://github.com/pytorch/pytorch/issues/57109
-        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        init.kaiming_uniform_(self.r, a =math.sqrt(5))
-        init.kaiming_uniform_(self.s, a =math.sqrt(5))
+        init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
+
+        # Calculate the standard deviation 
+        fan = init._calculate_correct_fan(self.weight, mode='fan_out')
+        gain = init.calculate_gain(nonlinearity='relu')
+        self.std = gain / math.sqrt(fan)
+        # Initialize r and s vectors with same parameters as the weight matrix
+        with torch.no_grad():
+            self.r.normal_(0, self.std)
+            self.s.normal_(0, self.std)
+        
         if self.bias is not None:
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
