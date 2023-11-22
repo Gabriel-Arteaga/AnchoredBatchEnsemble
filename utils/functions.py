@@ -1,10 +1,15 @@
 # Import libraries
+import sys
+sys.path.append('..')
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Union, Optional, Tuple
 import torch
 from torch import nn
+import pandas as pd
+from utils.models import BatchEnsemble
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Prediction function orginally created by wjmaddox\drbayes
@@ -121,7 +126,6 @@ def train_models(
     Train neural network models using various ensemble strategies.
 
     Args:
-        model (torch.nn.Module): The neural network model to be trained.
         ensemble_type (str): The ensemble strategy ('batch', 'anchored_batch', 'naive').
         ensemble_size (int): Number of ensemble members (relevant for 'batch' and 'anchored_batch' ensembles).
         data_noise (float): Magnitude of noise to be added to the data for 'anchored_batch' ensemble.
@@ -415,3 +419,159 @@ def train_models_w_mean_var(
                 return average_test_loss, average_rmse_loss
             else:
                 return average_test_loss
+
+
+def train_and_save_results(
+        model_name: str,
+        hidden_layers_options: list,
+        hidden_units_options: list,
+        input_shape: int,
+        loss_fn: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        train_loader: torch.utils.data.DataLoader,
+        test_loader: torch.utils.data.DataLoader,
+        ensemble_size: int,
+        epochs: int,
+        csv_file: str,
+        print_frequency: Optional[int] = 500,
+        weight_decay_options: Optional[list] = None,
+        data_noise_options: Optional[list] = None,
+        test: bool = True,
+        RMSE: bool = True,
+        learning_rate: Optional[float] = 0.001,
+        device: torch.device = device
+) -> None:
+    """
+    Train a model with specified configurations and save the results to a CSV file.
+
+    Parameters:
+    - model_name (str): Name of the model, e.g., 'naive', 'batch', or 'anchored_batch'.
+    - hidden_layers_options (list): List of integers representing the range of hidden layers to be considered.
+    - hidden_units_options (list): List of integers representing the hidden units to be considered.
+    - input_shape (int): Number of features in dataset
+    - loss_fn (torch.nn.Module): PyTorch loss function.
+    - optimizer (torch.optim.Optimizer): PyTorch optimizer.
+    - train_loader (torch.utils.data.DataLoader): PyTorch DataLoader for training data.
+    - test_loader (torch.utils.data.DataLoader): PyTorch DataLoader for test data.
+    - ensemble_size (int): Number of models in the ensemble.
+    - epochs (int): Number of training epochs.
+    - csv_file (str): Name of the CSV file to save the results.
+    - print_frequency (int, optional): Frequency of printing training information. Default is 500.
+    - weight_decay_options (list, optional): List of floats representing the weight decay values to be considered. Default is None.
+    - data_noise_options (list, optional): List of floats representing the data noise levels to be considered. Default is None.
+    - test (bool, optional): Whether to evaluate the model on the test set. Default is True.
+    - RMSE (bool, optional): Whether to calculate and save RMSE in the results. Default is True.
+    - learning_rate (float, optional): Learning rate for the optimizer. Default is 0.001.
+    - device (torch.device, optional): The device to use for training. Default is the global device.
+
+    Returns:
+    None: The results are saved to the specified CSV file.
+    """
+    # Initialize a list to store the results
+    results = []
+    # ENCE to be implemented
+    ENCE = None
+    # Loop over the configurations
+    for hidden_layers in hidden_layers_options:
+        for hidden_units in hidden_units_options:
+            if weight_decay_options != None:
+                data_noise = None
+                for weight_decay in weight_decay_options:
+                    if model_name == 'batch':
+                        model = BatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
+                    else:
+                        # Shall implement for Naive model
+                        model = None
+                    # Train the model and get the average loss on test data
+                    GNLLL_result, rmse_result = train_models_w_mean_var(
+                        model=model,
+                        ensemble_type=model_name,
+                        ensemble_size=ensemble_size,
+                        data_noise=data_noise,
+                        epochs=epochs,
+                        print_frequency=print_frequency,
+                        loss_fn=loss_fn,
+                        optimizer=optimizer,
+                        train_loader=train_loader,
+                        test_loader=test_loader,
+                        test=test,
+                        RMSE=RMSE,
+                        learning_rate=learning_rate,
+                        weight_decay=weight_decay,
+                        device=device
+                    )
+                    # Append the result to the list
+                    results.append({
+                        'model': model_name,
+                        'ensemble_size': ensemble_size,
+                        'hidden_layers': hidden_layers,
+                        'hidden_units': hidden_units,
+                        'weight_decay': weight_decay,
+                        'data_noise': data_noise,
+                        'epochs': epochs,
+                        'optimizer': 'Adam',
+                        'loss_fn': loss_fn.__class__.__name__,
+                        'learning_rate': learning_rate,
+                        'ENCE': ENCE,
+                        'GNLLL': GNLLL_result,
+                        'RMSE': rmse_result
+                    })
+            # If not weight decay, we are using AnchoredBatch
+            else:
+                weight_decay = None 
+                # Shall be implemented for AnchoredBatch
+                model = None
+                for data_noise in data_noise_options:
+                    # Train the model and get the average loss on test data
+                    GNLLL_result, rmse_result = train_models_w_mean_var(
+                        model=model,
+                        ensemble_type=model_name,
+                        ensemble_size=ensemble_size,
+                        data_noise=data_noise,
+                        epochs=epochs,
+                        print_frequency=print_frequency,
+                        loss_fn=loss_fn,
+                        optimizer=optimizer,
+                        train_loader=train_loader,
+                        test_loader=test_loader,
+                        test=test,
+                        RMSE=RMSE,
+                        learning_rate=learning_rate,
+                        weight_decay=weight_decay,
+                        device=device
+                    )
+
+                # Append the result to the list
+                results.append({
+                    'model': model_name,
+                    'ensemble_size': ensemble_size,
+                    'hidden_layers': hidden_layers,
+                    'hidden_units': hidden_units,
+                    'weight_decay': weight_decay,
+                    'data_noise': data_noise,
+                    'epochs': epochs,
+                    'optimizer': 'Adam',
+                    'loss_fn': loss_fn.__class__.__name__,
+                    'learning_rate': learning_rate,
+                    'ENCE': ENCE,
+                    'GNLLL': GNLLL_result,
+                    'RMSE': rmse_result
+                })
+
+    # Convert the results to a DataFrame
+    df_results = pd.DataFrame(results)
+
+    # Create a path string
+    directory_path = '..\\results'
+    csv_file_path = os.path.join(directory_path, csv_file)
+
+    # Check if the CSV file exists
+    try:
+        # Load the existing CSV file
+        df_existing = pd.read_csv(csv_file_path)
+    except FileNotFoundError:
+        # If the file doesn't exist, create a new DataFrame
+        df_existing = pd.DataFrame()
+
+    # Save the combined DataFrame to the CSV file without rewriting the header
+    df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
