@@ -2,8 +2,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 import torch
+from torch import nn
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Prediction function orginally created by wjmaddox\drbayes
@@ -113,7 +114,7 @@ def train_models(
     train_loader: torch.utils.data.DataLoader,
     test_loader: Optional[torch.utils.data.DataLoader],
     test: bool=False,
-    learning_rate: float=0.001,
+    learning_rate: Optional[float]=0.001,
     weight_decay: Optional[float]=None,
     device: torch.device = device) -> Union[None, float]:
     """
@@ -248,17 +249,21 @@ def train_models(
 
 
 def train_models_w_mean_var(
-    model: Union[torch.nn.Module, list[torch.nn.Module]],
+    model: torch.nn.Module,
     ensemble_type: str,
     ensemble_size: int,
     data_noise: float,
-    learning_rate: float,
     epochs: int,
     print_frequency: int,
-    test_loader: torch.utils.data.DataLoader,
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    device: torch.device = device) -> Union[None, float]:
+    train_loader: torch.utils.data.DataLoader,
+    test_loader: Optional[torch.utils.data.DataLoader],
+    test: bool=False,
+    RMSE: bool=False,
+    learning_rate: Optional[float]=0.001,
+    weight_decay: Optional[float]=None,
+    device: torch.device = device) -> Optional[Union[float, Tuple[float, float]]]:
     """
     Train neural network models using various ensemble strategies.
 
@@ -267,17 +272,26 @@ def train_models_w_mean_var(
         ensemble_type (str): The ensemble strategy ('batch', 'anchored_batch', 'naive').
         ensemble_size (int): Number of ensemble members (relevant for 'batch' and 'anchored_batch' ensembles).
         data_noise (float): Magnitude of noise to be added to the data for 'anchored_batch' ensemble.
-        learning_rate (float): Learning rate for optimization.
         epochs (int): Number of training epochs.
         print_frequency (int): Frequency of printing training progress.
-        data_loader (torch.utils.data.DataLoader): DataLoader providing training data.
         loss_fn (torch.nn.Module): Loss function for optimization.
         optimizer (torch.optim.Optimizer): Optimizer for updating model parameters.
+        train_loader (torch.utils.data.DataLoader): DataLoader providing training data.
+        test_loader (Optional[torch.utils.data.DataLoader]): DataLoader providing test data (default is None).
+        test (bool): True or False, Shall we measure on test data
+        RMSE (bool): If True will calculate RMSE
+        learning_rate (float): Learning rate for optimization.
         device (torch.device, optional): Device for training (default is device).
 
     Returns:
-        None
+        Optional[Union[float, Tuple[float, float]]]: If `test` is False or `test_loader` is None, returns None.
+        If `test` is True and `test_loader` is provided, returns the average test loss.
+        If `RMSE` is True, additionally returns the Root Mean Squared Error (RMSE).
     """
+    # If RMSE initiate MSE loss function
+    if RMSE:
+        MSE_loss_fn = nn.MSELoss()
+
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
         optimizer = optimizer(model.parameters(), lr=learning_rate)
         model.to(device)
@@ -285,7 +299,7 @@ def train_models_w_mean_var(
             # Training
             train_loss = 0
             # Add a loop to loop through the training batches
-            for batch, (X, y) in enumerate(data_loader):
+            for batch, (X, y) in enumerate(train_loader):
                 model.train()
                 # 1. Perform forward pass
                 mean, var = model(X.repeat(ensemble_size, 1))  # Make prediction
@@ -315,6 +329,30 @@ def train_models_w_mean_var(
             if epoch % print_frequency == 0:
                 print(f"Epoch: {epoch}\n-------")
                 print("Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
+        if test and test_loader is not None:
+            model.eval()
+            test_loss = 0
+            # If True initiate MSE Loss
+            if RMSE:
+                rmse_loss = 0
+            with torch.no_grad():
+                for batch, (X_test, y_test) in enumerate(test_loader):
+                    mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
+                    test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
+                    # If True Calculate the RMSE
+                    if RMSE:
+                        rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
+            # Compute the average over the batches
+            average_test_loss = test_loss / (batch + 1)
+            print(f"\nEvaluation on Test Data\n------------------------")
+            print("Average Test Loss:", average_test_loss)
+            if RMSE:
+                average_rmse_loss = rmse_loss  = rmse_loss / (batch + 1)
+                return average_test_loss, average_rmse_loss
+            else:
+                return average_test_loss
+
+
 
     elif ensemble_type == 'naive':
         # If naive, there are several models we need to sequentially train
@@ -328,7 +366,7 @@ def train_models_w_mean_var(
                 # Training
                 train_loss = 0
                 # Add a loop to loop through the training batches
-                for batch, (X, y) in enumerate(data_loader):
+                for batch, (X, y) in enumerate(test_loader):
                     model.train()
                     # 1. Perform forward pass
                     mean, var = model(X)  # Make prediction
@@ -351,3 +389,29 @@ def train_models_w_mean_var(
                     print(f"Epoch: {epoch}\n-------")
                     print("Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
 
+        # Evaluation on test data for each model
+        if test and test_loader is not None:
+            test_loss = 0
+            for Model in model:
+                Model.eval()
+                Model_test_loss = 0
+                if RMSE:
+                    Model_rmse_loss = 0
+                with torch.no_grad():
+                    for batch, (X_test, y_test) in enumerate(test_loader):
+                        mean_test, var_test = Model(X_test.repeat(ensemble_size, 1))
+                        Model_test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
+                        # If True calculate RMSE
+                        if RMSE:
+                            Model_rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
+                    average_test_loss += Model_test_loss/ (batch+1)
+                    if RMSE:
+                        average_rmse_loss += Model_rmse_loss / (batch+1)
+            average_test_loss /= ensemble_size
+            print(f"\nEvaluation on Test Data\n------------------------")
+            print("Average Test Loss:", average_test_loss)
+            if RMSE:
+                average_rmse_loss /= ensemble_size
+                return average_test_loss, average_rmse_loss
+            else:
+                return average_test_loss
