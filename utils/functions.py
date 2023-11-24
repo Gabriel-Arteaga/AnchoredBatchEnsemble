@@ -9,7 +9,7 @@ from typing import Union, Optional, Tuple
 import torch
 from torch import nn
 import pandas as pd
-from utils.models import BatchEnsemble
+from utils.models import BatchEnsemble, AnchoredBatchEnsemble
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Prediction function orginally created by wjmaddox\drbayes
@@ -46,7 +46,6 @@ def plot_predictive(data: np.ndarray, trajectories: np.ndarray, xs: np.ndarray, 
     plt.figure(figsize=(9., 7.))
     
     plt.plot(data[:, 0], data[:, 1], "o", color=red, alpha=0.7, markeredgewidth=1., markeredgecolor="k")
-    
     if mu is None:
         mu = np.mean(trajectories, axis=0)
     if sigma is None:
@@ -250,7 +249,74 @@ def train_models(
                 
             return average_test_loss
 
+def calculate_ence(
+    var_and_mse:torch.Tensor,
+    num_bins: int=10
+):
+    """
+    Calculate the Expected Normalized Calibration Error (ENCE) for a regression calibration evaluation[^1^][1].
 
+    Parameters:
+    var_and_mse (torch.Tensor): A tensor of variances and mean squared errors.
+    num_bins (int): The number of bins to use for the calculation.
+
+    Returns:
+    float: The ENCE value.
+    """
+
+    # Initialize the ENCE value
+    calibration_error = 0
+
+    # Get the total number of data points
+    N = len(var_and_mse)
+
+    # Get the minimum and maximum variances
+    min_var = torch.min(var_and_mse[:,0])
+    max_var = torch.max(var_and_mse[:,0])
+
+    # Arrange bin ranges uniformly 
+    bin_ranges = torch.linspace(min_var, max_var, num_bins)
+
+    # Sort the values
+    var_and_mse = torch.sort(var_and_mse,dim=0)[0]
+
+    # Initialize the index for the sorted tensor
+    bin_start_index = 0
+
+    # Iterate over the bin ranges
+    for max_var in bin_ranges[1:]:
+        # Initialize the cardinality of the bin
+        num_in_bin = 0
+
+        # Initialize variables to store the mean squared error and variance of each bin
+        bin_mse = 0
+        bin_var = 0
+
+        # Iterate over the variances and mean squared errors
+        for var, mse in zip(var_and_mse[bin_start_index:,0], var_and_mse[bin_start_index:,1]):
+            # Accumulate the mean squared error and variance of each bin, count the cardinality of the bin
+            if var <= max_var:
+                bin_mse += mse
+                bin_var  += var
+                num_in_bin += 1
+                bin_start_index += 1
+            else:
+                # We have gone through all elements in the bin
+                break
+
+        # Calculate the root mean square error and mean variance of each bin
+        rmse = torch.sqrt(bin_mse / num_in_bin)
+        mean_var = torch.sqrt(bin_var / num_in_bin)
+
+        # Add each bin score to the final ENCE variable
+        calibration_error += torch.abs(mean_var - rmse) / mean_var
+
+    # Normalize the ENCE with the number of data points
+    calibration_error /= N
+
+    return calibration_error
+
+    
 
 def train_models_w_mean_var(
     model: torch.nn.Module,
@@ -265,6 +331,7 @@ def train_models_w_mean_var(
     test_loader: Optional[torch.utils.data.DataLoader],
     test: bool=False,
     RMSE: bool=False,
+    ENCE: bool=False,
     learning_rate: Optional[float]=0.001,
     weight_decay: Optional[float]=None,
     device: torch.device = device) -> Optional[Union[float, Tuple[float, float]]]:
@@ -339,19 +406,33 @@ def train_models_w_mean_var(
             # If True initiate MSE Loss
             if RMSE:
                 rmse_loss = 0
+                if ENCE:
+                    # Initiate an empty tensor
+                    var_mse = torch.Tensor()
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
                     mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
                     test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
                     # If True Calculate the RMSE
                     if RMSE:
-                        rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
+                        MSE = MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))
+                        #rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
+                        if ENCE:
+                            # Gather the predicted standard deviation of model and its corresponding RMSE
+                            batch_result = torch.stack((var_test, MSE), dim = 0)
+                            # Append the batch result
+                            var_mse = torch.cat((var_mse, batch_result), dim = 0)
+                        rmse_loss += torch.sqrt(MSE).item()
+
             # Compute the average over the batches
             average_test_loss = test_loss / (batch + 1)
             print(f"\nEvaluation on Test Data\n------------------------")
             print("Average Test Loss:", average_test_loss)
             if RMSE:
                 average_rmse_loss = rmse_loss  = rmse_loss / (batch + 1)
+                if ENCE:
+                    ence = calculate_ence(var_mse)
+                    return average_test_loss, average_rmse_loss, ence
                 return average_test_loss, average_rmse_loss
             else:
                 return average_test_loss
@@ -518,9 +599,8 @@ def train_and_save_results(
                     })
             # If not weight decay, we are using AnchoredBatch
             else:
+                model = AnchoredBatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
                 weight_decay = None 
-                # Shall be implemented for AnchoredBatch
-                model = None
                 for data_noise in data_noise_options:
                     # Train the model and get the average loss on test data
                     GNLLL_result, rmse_result = train_models_w_mean_var(
@@ -541,22 +621,22 @@ def train_and_save_results(
                         device=device
                     )
 
-                # Append the result to the list
-                results.append({
-                    'model': model_name,
-                    'ensemble_size': ensemble_size,
-                    'hidden_layers': hidden_layers,
-                    'hidden_units': hidden_units,
-                    'weight_decay': weight_decay,
-                    'data_noise': data_noise,
-                    'epochs': epochs,
-                    'optimizer': 'Adam',
-                    'loss_fn': loss_fn.__class__.__name__,
-                    'learning_rate': learning_rate,
-                    'ENCE': ENCE,
-                    'GNLLL': GNLLL_result,
-                    'RMSE': rmse_result
-                })
+                    # Append the result to the list
+                    results.append({
+                        'model': model_name,
+                        'ensemble_size': ensemble_size,
+                        'hidden_layers': hidden_layers,
+                        'hidden_units': hidden_units,
+                        'weight_decay': weight_decay,
+                        'data_noise': data_noise,
+                        'epochs': epochs,
+                        'optimizer': 'Adam',
+                        'loss_fn': loss_fn.__class__.__name__,
+                        'learning_rate': learning_rate,
+                        'ENCE': ENCE,
+                        'GNLLL': GNLLL_result,
+                        'RMSE': rmse_result
+                    })
 
     # Convert the results to a DataFrame
     df_results = pd.DataFrame(results)
