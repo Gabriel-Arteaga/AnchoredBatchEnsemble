@@ -303,18 +303,20 @@ def calculate_ence(
             else:
                 # We have gone through all elements in the bin
                 break
+        
+        # Ensure no division by zero
+        if num_in_bin != 0:
+            # Calculate the root mean square error and mean variance of each bin
+            rmse = torch.sqrt(bin_mse / num_in_bin)
+            mean_var = torch.sqrt(bin_var / num_in_bin)
 
-        # Calculate the root mean square error and mean variance of each bin
-        rmse = torch.sqrt(bin_mse / num_in_bin)
-        mean_var = torch.sqrt(bin_var / num_in_bin)
-
-        # Add each bin score to the final ENCE variable
-        calibration_error += torch.abs(mean_var - rmse) / mean_var
+            # Add each bin score to the final ENCE variable
+            calibration_error += torch.abs(mean_var - rmse) / mean_var
 
     # Normalize the ENCE with the number of data points
     calibration_error /= N
 
-    return calibration_error
+    return calibration_error.item()
 
     
 
@@ -361,7 +363,7 @@ def train_models_w_mean_var(
     """
     # If RMSE initiate MSE loss function
     if RMSE:
-        MSE_loss_fn = nn.MSELoss()
+        MSE_loss_fn = nn.MSELoss(reduction='none')
 
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
         optimizer = optimizer(model.parameters(), lr=learning_rate)
@@ -408,7 +410,7 @@ def train_models_w_mean_var(
                 rmse_loss = 0
                 if ENCE:
                     # Initiate an empty tensor
-                    var_mse = torch.Tensor()
+                    var_mse = torch.Tensor().to(device)
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
                     mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
@@ -419,10 +421,11 @@ def train_models_w_mean_var(
                         #rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
                         if ENCE:
                             # Gather the predicted standard deviation of model and its corresponding RMSE
-                            batch_result = torch.stack((var_test, MSE), dim = 0)
+                            batch_result = torch.cat((var_test, MSE), dim = 1)
+
                             # Append the batch result
                             var_mse = torch.cat((var_mse, batch_result), dim = 0)
-                        rmse_loss += torch.sqrt(MSE).item()
+                        rmse_loss += torch.sqrt(MSE.mean()).item()
 
             # Compute the average over the batches
             average_test_loss = test_loss / (batch + 1)
