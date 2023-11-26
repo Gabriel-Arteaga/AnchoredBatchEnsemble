@@ -6,17 +6,20 @@ class EarlyStopping:
         self.restore_best_weights = restore_best_weights
         self.best_model = None
         self.best_loss = None
+        self.epoch = 0
         self.counter = 0
         self.status = ""
 
-    def __call__(self, model, val_loss):
+    def __call__(self, model, val_loss, epoch):
         if self.best_loss is None:
             self.best_loss = val_loss
             self.best_model = copy.deepcopy(model.state_dict())
+            self.epoch = epoch
         elif self.best_loss - val_loss >= self.min_delta:
             self.best_model = copy.deepcopy(model.state_dict())
             self.best_loss = val_loss
             self.counter = 0
+            self.epoch = epoch
             self.status = f"Improvement found, counter reset to {self.counter}"
         else:
             self.counter += 1
