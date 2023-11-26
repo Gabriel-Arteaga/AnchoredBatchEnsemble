@@ -418,21 +418,25 @@ def train_models_w_mean_var(
                 # 5. Optimizer step
                 optimizer.step()
 
-            if epoch % print_frequency == 0:
-                print(f"Epoch: {epoch}\n-------")
-                print("Train Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
+    
             with torch.no_grad():
+                test_loss = 0
                 for batch, (X_test, y_test) in enumerate(test_loader):
                     mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
                     test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
                 average_test_loss = test_loss / (batch + 1)
             # Check if we should stop early
             done = ES(model,average_test_loss, epoch)
+            if epoch % print_frequency == 0:
+                print(f"Epoch: {epoch}\n-------")
+                print("Train Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
+                print('Test loss:',average_test_loss, ES.status)
             if done:
                 # Set epoch to the epoch which achieves best test loss
                 epoch = ES.epoch
                 # Early stop
                 break
+
         if test and test_loader is not None:
             model.eval()
             test_loss = 0
@@ -552,6 +556,7 @@ def train_and_save_results(
         weight_decay_options: Optional[list] = None,
         data_noise_options: Optional[list] = None,
         test: bool = True,
+        early_stopping: bool =True,
         RMSE: bool = True,
         ENCE: bool = True,
         learning_rate: Optional[float] = 0.001,
@@ -583,8 +588,12 @@ def train_and_save_results(
     Returns:
     None: The results are saved to the specified CSV file.
     """
-    # Initialize a list to store the results
-    results = []
+    # Create a path string
+    directory_path = '..\\results'
+    csv_file_path = os.path.join(directory_path, csv_file)
+
+    # Initialize a dict to store the results
+    results = {}
     # Loop over the configurations
     for hidden_layers in hidden_layers_options:
         for hidden_units in hidden_units_options:
@@ -597,7 +606,7 @@ def train_and_save_results(
                         # Shall implement for Naive model
                         model = None
                     # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result, ENCE_result = train_models_w_mean_var(
+                    GNLLL_result, rmse_result, ENCE_result, epoch = train_models_w_mean_var(
                         model=model,
                         ensemble_type=model_name,
                         ensemble_size=ensemble_size,
@@ -609,35 +618,49 @@ def train_and_save_results(
                         train_loader=train_loader,
                         test_loader=test_loader,
                         test=test,
+                        early_stopping=early_stopping,
                         RMSE=RMSE,
                         ENCE=ENCE,
                         learning_rate=learning_rate,
                         weight_decay=weight_decay,
                         device=device
                     )
-                    # Append the result to the list
-                    results.append({
+                    # Save result in a dict
+                    results = {
                         'model': model_name,
                         'ensemble_size': ensemble_size,
                         'hidden_layers': hidden_layers,
                         'hidden_units': hidden_units,
                         'weight_decay': weight_decay,
                         'data_noise': data_noise,
-                        'epochs': epochs,
+                        'epochs': epoch, # Epoch which model stopped training 
                         'optimizer': 'Adam',
                         'loss_fn': loss_fn.__class__.__name__,
                         'learning_rate': learning_rate,
                         'ENCE': ENCE_result,
                         'GNLLL': GNLLL_result,
                         'RMSE': rmse_result
-                    })
+                    }
+                    # Convert the results to a DataFrame
+                    df_results = pd.DataFrame([results])
+
+                    # Check if the CSV file exists
+                    try:
+                        # Load the existing CSV file
+                        df_existing = pd.read_csv(csv_file_path)
+                    except FileNotFoundError:
+                        # If the file doesn't exist, create a new DataFrame
+                        df_existing = pd.DataFrame()
+
+                    # Save the combined DataFrame to the CSV file without rewriting the header
+                    df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
             # If not weight decay, we are using AnchoredBatch
             else:
                 model = AnchoredBatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
                 weight_decay = None 
                 for data_noise in data_noise_options:
                     # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result, ENCE_result = train_models_w_mean_var(
+                    GNLLL_result, rmse_result, ENCE_result,epoch = train_models_w_mean_var(
                         model=model,
                         ensemble_type=model_name,
                         ensemble_size=ensemble_size,
@@ -649,6 +672,7 @@ def train_and_save_results(
                         train_loader=train_loader,
                         test_loader=test_loader,
                         test=test,
+                        early_stopping=early_stopping,
                         RMSE=RMSE,
                         ENCE=ENCE,
                         learning_rate=learning_rate,
@@ -656,37 +680,33 @@ def train_and_save_results(
                         device=device
                     )
 
-                    # Append the result to the list
-                    results.append({
+                    # Save result in a dict
+                    results = {
                         'model': model_name,
                         'ensemble_size': ensemble_size,
                         'hidden_layers': hidden_layers,
                         'hidden_units': hidden_units,
                         'weight_decay': weight_decay,
                         'data_noise': data_noise,
-                        'epochs': epochs,
+                        'epochs': epoch,
                         'optimizer': 'Adam',
                         'loss_fn': loss_fn.__class__.__name__,
                         'learning_rate': learning_rate,
                         'ENCE': ENCE_result,
                         'GNLLL': GNLLL_result,
                         'RMSE': rmse_result
-                    })
+                    }
 
-    # Convert the results to a DataFrame
-    df_results = pd.DataFrame(results)
+                    # Convert the results to a DataFrame
+                    df_results = pd.DataFrame([results])
 
-    # Create a path string
-    directory_path = '..\\results'
-    csv_file_path = os.path.join(directory_path, csv_file)
+                    # Check if the CSV file exists
+                    try:
+                        # Load the existing CSV file
+                        df_existing = pd.read_csv(csv_file_path)
+                    except FileNotFoundError:
+                        # If the file doesn't exist, create a new DataFrame
+                        df_existing = pd.DataFrame()
 
-    # Check if the CSV file exists
-    try:
-        # Load the existing CSV file
-        df_existing = pd.read_csv(csv_file_path)
-    except FileNotFoundError:
-        # If the file doesn't exist, create a new DataFrame
-        df_existing = pd.DataFrame()
-
-    # Save the combined DataFrame to the CSV file without rewriting the header
-    df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
+                    # Save the combined DataFrame to the CSV file without rewriting the header
+                    df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
