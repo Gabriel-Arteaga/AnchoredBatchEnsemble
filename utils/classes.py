@@ -1,3 +1,5 @@
+import copy
+
 class EarlyStopping:
     '''Credit to jeffheaton'''
     def __init__(self, patience=5, min_delta=0, restore_best_weights=True):
