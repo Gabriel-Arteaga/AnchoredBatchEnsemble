@@ -10,6 +10,7 @@ import torch
 from torch import nn
 import pandas as pd
 from utils.models import BatchEnsemble, AnchoredBatchEnsemble
+from utils.classes import EarlyStopping
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Prediction function orginally created by wjmaddox\drbayes
@@ -118,6 +119,9 @@ def train_models(
     train_loader: torch.utils.data.DataLoader,
     test_loader: Optional[torch.utils.data.DataLoader],
     test: bool=False,
+    early_stopping: bool=False,
+    patience: int=10,
+    min_delta: float=0.0,
     learning_rate: Optional[float]=0.001,
     weight_decay: Optional[float]=None,
     device: torch.device = device) -> Union[None, float]:
@@ -135,6 +139,9 @@ def train_models(
         train_loader (torch.utils.data.DataLoader): DataLoader providing training data.
         test_loader (Optional[torch.utils.data.DataLoader]): DataLoader providing test data (default is None).
         test (bool): True or False, Shall we measure test 
+        early_stopping (bool): Stop early according to patience?
+        patience (int): Number of turns with no improvement until early stopping is triggered (default is 10). 
+        min_delta (float): Minimum change in validation loss to be considered an improvement (default is 0.0)
         learning_rate (float): Learning rate for optimization.
         device (torch.device, optional): Device for training (default is device).
 
@@ -142,6 +149,9 @@ def train_models(
          Union[None, float]: If test is False or test_loader is None, returns None. 
                            If test is True and test_loader is provided, returns the average test loss.
     """
+    # Still need to implement EarlyStopping for normal model architectures.
+    if early_stopping:
+                ES = EarlyStopping(patience=patience,min_delta=min_delta)
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
         if weight_decay == None:
             optimizer = optimizer(model.parameters(),lr=learning_rate)
@@ -179,6 +189,7 @@ def train_models(
 
                 #5. Optimizer step
                 optimizer.step()
+
             if epoch%print_frequency == 0:
                 print(f"Epoch: {epoch}\n-------")
                 print("Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
@@ -334,6 +345,9 @@ def train_models_w_mean_var(
     test: bool=False,
     RMSE: bool=False,
     ENCE: bool=False,
+    early_stopping: bool=False,
+    patience: int=10,
+    min_delta: float=0.0,
     learning_rate: Optional[float]=0.001,
     weight_decay: Optional[float]=None,
     device: torch.device = device) -> Optional[Union[float, Tuple[float, float]]]:
@@ -351,7 +365,10 @@ def train_models_w_mean_var(
         optimizer (torch.optim.Optimizer): Optimizer for updating model parameters.
         train_loader (torch.utils.data.DataLoader): DataLoader providing training data.
         test_loader (Optional[torch.utils.data.DataLoader]): DataLoader providing test data (default is None).
-        test (bool): True or False, Shall we measure on test data
+        test (bool): True or False, Shall we measure on test data,
+        early_stopping (bool): Do we want to use early_stopping to reduce overfitting? 
+        patience (int): Number of turns with no improvement until early stopping is triggered (default is 10). 
+        min_delta (float): Minimum change in validation loss to be considered an improvement (default is 0.0)
         RMSE (bool): If True will calculate RMSE
         learning_rate (float): Learning rate for optimization.
         device (torch.device, optional): Device for training (default is device).
@@ -361,6 +378,8 @@ def train_models_w_mean_var(
         If `test` is True and `test_loader` is provided, returns the average test loss.
         If `RMSE` is True, additionally returns the Root Mean Squared Error (RMSE).
     """
+    if early_stopping:
+        ES = EarlyStopping(patience=patience,min_delta=min_delta)
     # If RMSE initiate MSE loss function
     if RMSE:
         MSE_loss_fn = nn.MSELoss(reduction='none')
@@ -401,7 +420,19 @@ def train_models_w_mean_var(
 
             if epoch % print_frequency == 0:
                 print(f"Epoch: {epoch}\n-------")
-                print("Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
+                print("Train Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
+            with torch.no_grad():
+                for batch, (X_test, y_test) in enumerate(test_loader):
+                    mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
+                    test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
+                average_test_loss = test_loss / (batch + 1)
+            # Check if we should stop early
+            done = ES(model,average_test_loss, epoch)
+            if done:
+                # Set epoch to the epoch which achieves best test loss
+                epoch = ES.epoch
+                # Early stop
+                break
         if test and test_loader is not None:
             model.eval()
             test_loss = 0
@@ -432,16 +463,16 @@ def train_models_w_mean_var(
             print(f"\nEvaluation on Test Data\n------------------------")
             print("Average Test Loss:", average_test_loss)
             if RMSE:
-                average_rmse_loss = rmse_loss  = rmse_loss / (batch + 1)
+                average_rmse_loss = rmse_loss / (batch + 1)
                 if ENCE:
                     ence = calculate_ence(var_mse)
-                    return average_test_loss, average_rmse_loss, ence
-                return average_test_loss, average_rmse_loss
+                    return average_test_loss, average_rmse_loss, ence, epoch
+                return average_test_loss, average_rmse_loss, epoch
             else:
-                return average_test_loss
+                return average_test_loss, epoch
 
 
-
+    # Need to implement early stop and ENCE for naive ensemble type
     elif ensemble_type == 'naive':
         # If naive, there are several models we need to sequentially train
         for Model in model:
@@ -522,6 +553,7 @@ def train_and_save_results(
         data_noise_options: Optional[list] = None,
         test: bool = True,
         RMSE: bool = True,
+        ENCE: bool = True,
         learning_rate: Optional[float] = 0.001,
         device: torch.device = device
 ) -> None:
@@ -553,8 +585,6 @@ def train_and_save_results(
     """
     # Initialize a list to store the results
     results = []
-    # ENCE to be implemented
-    ENCE = None
     # Loop over the configurations
     for hidden_layers in hidden_layers_options:
         for hidden_units in hidden_units_options:
@@ -567,7 +597,7 @@ def train_and_save_results(
                         # Shall implement for Naive model
                         model = None
                     # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result = train_models_w_mean_var(
+                    GNLLL_result, rmse_result, ENCE_result = train_models_w_mean_var(
                         model=model,
                         ensemble_type=model_name,
                         ensemble_size=ensemble_size,
@@ -580,6 +610,7 @@ def train_and_save_results(
                         test_loader=test_loader,
                         test=test,
                         RMSE=RMSE,
+                        ENCE=ENCE,
                         learning_rate=learning_rate,
                         weight_decay=weight_decay,
                         device=device
@@ -596,7 +627,7 @@ def train_and_save_results(
                         'optimizer': 'Adam',
                         'loss_fn': loss_fn.__class__.__name__,
                         'learning_rate': learning_rate,
-                        'ENCE': ENCE,
+                        'ENCE': ENCE_result,
                         'GNLLL': GNLLL_result,
                         'RMSE': rmse_result
                     })
@@ -606,7 +637,7 @@ def train_and_save_results(
                 weight_decay = None 
                 for data_noise in data_noise_options:
                     # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result = train_models_w_mean_var(
+                    GNLLL_result, rmse_result, ENCE_result = train_models_w_mean_var(
                         model=model,
                         ensemble_type=model_name,
                         ensemble_size=ensemble_size,
@@ -619,6 +650,7 @@ def train_and_save_results(
                         test_loader=test_loader,
                         test=test,
                         RMSE=RMSE,
+                        ENCE=ENCE,
                         learning_rate=learning_rate,
                         weight_decay=weight_decay,
                         device=device
@@ -636,7 +668,7 @@ def train_and_save_results(
                         'optimizer': 'Adam',
                         'loss_fn': loss_fn.__class__.__name__,
                         'learning_rate': learning_rate,
-                        'ENCE': ENCE,
+                        'ENCE': ENCE_result,
                         'GNLLL': GNLLL_result,
                         'RMSE': rmse_result
                     })
