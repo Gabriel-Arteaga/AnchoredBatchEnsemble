@@ -67,7 +67,7 @@ def plot_predictive(data: np.ndarray, trajectories: np.ndarray, xs: np.ndarray, 
     if title:
         plt.title(title, fontsize=16)
 
-def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray, xs: np.ndarray, title: str = None) -> None:
+def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray, ensemble_size: int, xs: np.ndarray, title: str = None) -> None:
     """
     Plots predictive mean and variance with uncertainty bands given arrays of means and variances.
 
@@ -75,6 +75,7 @@ def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray
     - data (np.ndarray): Data points for scatter plot.
     - means (np.ndarray): Predicted means for each ensemble member.
     - variances (np.ndarray): Predicted variances for each ensemble member.
+    - ensemble_size (int): Number of ensemble members.
     - xs (np.ndarray): X-axis values for the trajectories.
     - title (str, optional): Title for the plot.
 
@@ -165,10 +166,10 @@ def train_models(
             for batch, (X, y) in enumerate(train_loader):
                 model.train()
                 # 1. Perform forward pass
-                y_pred = model(X.repeat(ensemble_size,1)) # Make prediction
+                y_pred = model(X.extend(ensemble_size,1)) # Make prediction
 
                 # 2. Calculate loss per batch
-                loss = loss_fn(y_pred, y.repeat(ensemble_size,1)) # Calculate loss with MSE
+                loss = loss_fn(y_pred, y.extend(ensemble_size,1)) # Calculate loss with MSE
 
                 train_loss += loss.item() # Accumalate loss
 
@@ -200,8 +201,8 @@ def train_models(
             test_loss = 0
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
-                    y_pred_test = model(X_test.repeat(ensemble_size, 1))
-                    test_loss += loss_fn(y_pred_test, y_test.repeat(ensemble_size, 1)).item()
+                    y_pred_test = model(X_test.extend(ensemble_size, 1))
+                    test_loss += loss_fn(y_pred_test, y_test.extend(ensemble_size, 1)).item()
 
             average_test_loss = test_loss / (batch + 1)
             print(f"\nEvaluation on Test Data\n------------------------")
@@ -394,10 +395,10 @@ def train_models_w_mean_var(
             for batch, (X, y) in enumerate(train_loader):
                 model.train()
                 # 1. Perform forward pass
-                mean, var = model(X.repeat(ensemble_size, 1))  # Make prediction
+                mean, var = model(X.extend(ensemble_size, 1))  # Make prediction
 
                 # 2. Calculate loss per batch
-                loss = loss_fn(mean, y.repeat(ensemble_size, 1), var)  # Calculate loss with MSE
+                loss = loss_fn(mean, y.extend(ensemble_size, 1), var)  # Calculate loss with MSE
 
                 train_loss += loss.item()  # Accumulate loss
 
@@ -422,20 +423,23 @@ def train_models_w_mean_var(
             with torch.no_grad():
                 test_loss = 0
                 for batch, (X_test, y_test) in enumerate(test_loader):
-                    mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
-                    test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
+                    mean_test, var_test = model(X_test.extend(ensemble_size, 1))
+                    test_loss += loss_fn(mean_test, y_test.extend(ensemble_size, 1), var_test).item()
                 average_test_loss = test_loss / (batch + 1)
             # Check if we should stop early
-            done = ES(model,average_test_loss, epoch)
+            if early_stopping:
+                done = ES(model,average_test_loss, epoch)
             if epoch % print_frequency == 0:
                 print(f"Epoch: {epoch}\n-------")
                 print("Train Loss:", train_loss / (batch + 1))  # Calculate and print average loss per batch
-                print('Test loss:',average_test_loss, ES.status)
-            if done:
-                # Set epoch to the epoch which achieves best test loss
-                epoch = ES.epoch
-                # Early stop
-                break
+                if early_stopping:
+                    print('Test loss:',average_test_loss, ES.status)
+            if early_stopping:
+                if done:
+                    # Set epoch to the epoch which achieves best test loss
+                    epoch = ES.epoch
+                    # Early stop
+                    break
 
         if test and test_loader is not None:
             model.eval()
@@ -448,12 +452,11 @@ def train_models_w_mean_var(
                     var_mse = torch.Tensor().to(device)
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
-                    mean_test, var_test = model(X_test.repeat(ensemble_size, 1))
-                    test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
+                    mean_test, var_test = model(X_test.extend(ensemble_size, 1))
+                    test_loss += loss_fn(mean_test, y_test.extend(ensemble_size, 1), var_test).item()
                     # If True Calculate the RMSE
                     if RMSE:
-                        MSE = MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))
-                        #rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
+                        MSE = MSE_loss_fn(mean_test, y_test.extend(ensemble_size, 1))
                         if ENCE:
                             # Gather the predicted standard deviation of model and its corresponding RMSE
                             batch_result = torch.cat((var_test, MSE), dim = 1)
@@ -522,11 +525,11 @@ def train_models_w_mean_var(
                     Model_rmse_loss = 0
                 with torch.no_grad():
                     for batch, (X_test, y_test) in enumerate(test_loader):
-                        mean_test, var_test = Model(X_test.repeat(ensemble_size, 1))
-                        Model_test_loss += loss_fn(mean_test, y_test.repeat(ensemble_size, 1), var_test).item()
+                        mean_test, var_test = Model(X_test.extend(ensemble_size, 1))
+                        Model_test_loss += loss_fn(mean_test, y_test.extend(ensemble_size, 1), var_test).item()
                         # If True calculate RMSE
                         if RMSE:
-                            Model_rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.repeat(ensemble_size, 1))).item()
+                            Model_rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.extend(ensemble_size, 1))).item()
                     average_test_loss += Model_test_loss/ (batch+1)
                     if RMSE:
                         average_rmse_loss += Model_rmse_loss / (batch+1)
