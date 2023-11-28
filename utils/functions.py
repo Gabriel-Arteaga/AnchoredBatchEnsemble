@@ -352,6 +352,30 @@ def calculate_ence(
 
     return calibration_error.item()
 
+def calculate_uncertainties(means: torch.Tensor, variances: torch.Tensor, ensemble_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Calculate aleatoric, epistemic, and total uncertainties.
+
+    Args:
+    - means (torch.Tensor): Tensor of shape (data_size,1) containing mean predictions.
+    - variances (torch.Tensor): Tensor of shape (data_size,1) containing model variances.
+    - ensemble_size (int): Number of ensemble members.
+
+    Returns:
+    - aleatoric_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing aleatoric uncertainty.
+    - epistemic_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing epistemic uncertainty.
+    - total_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing total uncertainty.
+    """
+    # Reshape the tensors to (ensemble_size, data_size)
+    mean = means.reshape(ensemble_size, means.shape[0]//ensemble_size)
+    var = variances.reshape(ensemble_size , variances.shape[0]//ensemble_size)
+
+    # Compute the different uncertainties
+    aleatoric_uncertainty = torch.sum(var, axis=0) / ensemble_size
+    epistemic_uncertainty = (1/ensemble_size*torch.sum(mean**2,axis=0))-(1/ensemble_size*torch.sum(mean,axis=0))**2
+    total_uncertainty = aleatoric_uncertainty+epistemic_uncertainty
+
+    return aleatoric_uncertainty, epistemic_uncertainty, total_uncertainty
 
 def train_models_w_mean_var(
     model: torch.nn.Module,
