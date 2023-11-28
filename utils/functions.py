@@ -4,11 +4,14 @@ sys.path.append('..')
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.lines as mlines
 import seaborn as sns
 from typing import Union, Optional, Tuple
 import torch
 from torch import nn
 import pandas as pd
+import time
 from utils.models import BatchEnsemble, AnchoredBatchEnsemble
 from utils.classes import EarlyStopping
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -367,12 +370,12 @@ def calculate_uncertainties(means: torch.Tensor, variances: torch.Tensor, ensemb
     - total_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing total uncertainty.
     """
     # Reshape the tensors to (ensemble_size, data_size)
-    mean = means.reshape(ensemble_size, means.shape[0]//ensemble_size)
-    var = variances.reshape(ensemble_size , variances.shape[0]//ensemble_size)
+    mean = means.squeeze()
+    var = variances.squeeze()
 
     # Compute the different uncertainties
-    aleatoric_uncertainty = torch.sum(var, axis=0) / ensemble_size
-    epistemic_uncertainty = (1/ensemble_size*torch.sum(mean**2,axis=0))-(1/ensemble_size*torch.sum(mean,axis=0))**2
+    aleatoric_uncertainty = torch.sum(var, axis=1) / ensemble_size
+    epistemic_uncertainty = (1/ensemble_size*torch.sum(mean**2,axis=1))-(1/ensemble_size*torch.sum(mean,axis=1))**2
     total_uncertainty = aleatoric_uncertainty+epistemic_uncertainty
 
     return aleatoric_uncertainty, epistemic_uncertainty, total_uncertainty
@@ -429,26 +432,33 @@ def train_models_w_mean_var(
     # If RMSE initiate MSE loss function
     if RMSE:
         MSE_loss_fn = nn.MSELoss(reduction='none')
+    
+    # Record the start time for training
+    start_time_training = time.time()
 
+    # Initiate variable which stores test timer
+    test_time = 0
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
         optimizer = optimizer(model.parameters(), lr=learning_rate)
         model.to(device)
+
         for epoch in range(epochs):
             # Training
             train_loss = 0
             # Add a loop to loop through the training batches
             for batch, (X, y) in enumerate(train_loader):
                 model.train()
+                batch_size = X.shape[0]
                 # 1. Perform forward pass
-                mean, var = model(X.expand(ensemble_size, 1))  # Make prediction
+                mean, var = model(X.unsqueeze(1).expand(-1, ensemble_size, -1))  # Make prediction
 
                 # 2. Calculate loss per batch
-                loss = loss_fn(mean, y.expand(ensemble_size, 1), var)  # Calculate loss with MSE
+                # *** Comment, need to check if 1 (out_feature) dimension ever change when using GaussianNLLLoss***
+                loss = loss_fn(mean, y.unsqueeze(1).expand(-1, ensemble_size, -1), var)  # Calculate loss with MSE
 
                 train_loss += loss.item()  # Accumulate loss
 
                 if ensemble_type == 'anchored_batch':
-                    batch_size = X.shape[0]
                     # Calculate regularization term
                     reg_term = 0
                     for layer in model.layer_stack.modules():
@@ -463,13 +473,14 @@ def train_models_w_mean_var(
                 loss.backward()
                 # 5. Optimizer step
                 optimizer.step()
+            
 
-    
+            test_time_start = time.time()
             with torch.no_grad():
                 test_loss = 0
                 for batch, (X_test, y_test) in enumerate(test_loader):
-                    mean_test, var_test = model(X_test.expand(ensemble_size, 1))
-                    test_loss += loss_fn(mean_test, y_test.expand(ensemble_size, 1), var_test).item()
+                    mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
+                    test_loss += loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1), var_test).item()
                 average_test_loss = test_loss / (batch + 1)
             # Check if we should stop early
             if early_stopping:
@@ -485,43 +496,76 @@ def train_models_w_mean_var(
                     epoch = ES.epoch
                     # Early stop
                     break
+            # Add the time taken to test the model performance against test data
+            test_time_end = time.time()
+            test_time += test_time_end-test_time_start
+        # Calculate training time
+        end_time_training = time.time()
+        training_time = end_time_training-start_time_training-test_time
 
         if test and test_loader is not None:
             model.eval()
             test_loss = 0
+            ensemble_test_loss = 0
             # If True initiate MSE Loss
             if RMSE:
                 rmse_loss = 0
+                ensemble_rmse_loss = 0
                 if ENCE:
-                    # Initiate an empty tensor
+                    # Initiate empty tensors will store variance in first column and MSE in the second column
                     var_mse = torch.Tensor().to(device)
+                    ensemble_var_mse = torch.Tensor().to(device)
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
-                    mean_test, var_test = model(X_test.expand(ensemble_size, 1))
-                    test_loss += loss_fn(mean_test, y_test.expand(ensemble_size, 1), var_test).item()
+                    mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
+                    test_loss += loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1), var_test).item()
+                    
+                    # Calculate combined ensemble's loss
+                    #print('mean shape:',mean_test.shape, 'var shape:',var_test.shape)
+                    aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
+                    #print(combined_uncertainty.shape)
+                    ensemble_mean = torch.mean(mean_test, dim=1)
+                    #print(y_test.shape)
+                    print('ens_mean shape:',ensemble_mean.shape, 'y shape:', y_test.shape, 'uncert:', combined_uncertainty.shape)
+                    ensemble_test_loss += loss_fn(ensemble_mean, y_test, combined_uncertainty.unsqueeze(1)).item()
+
                     # If True Calculate the RMSE
                     if RMSE:
-                        MSE = MSE_loss_fn(mean_test, y_test.expand(ensemble_size, 1))
+                        MSE = MSE_loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1))
+                        #print('mse shape:', MSE.shape)
+                        #print('ensemble_mean:',ensemble_mean.shape, 'y_test:', y_test.shape)
+                        ensemble_MSE = MSE_loss_fn(ensemble_mean, y_test)
                         if ENCE:
                             # Gather the predicted standard deviation of model and its corresponding RMSE
-                            batch_result = torch.cat((var_test, MSE), dim = 1)
+                            batch_result = torch.stack((var_test.reshape(-1,1).squeeze(), MSE.reshape(-1,1).squeeze()), dim = 1)
+                            #print('batch shape:', batch_result.shape)
+                            ensemble_batch_result = torch.stack((combined_uncertainty, ensemble_MSE.squeeze()), dim=1)
+                            #print('ensemble_batch shape:', ensemble_batch_result.shape)
 
                             # Append the batch result
                             var_mse = torch.cat((var_mse, batch_result), dim = 0)
+                            ensemble_var_mse = torch.cat((ensemble_var_mse, ensemble_batch_result), dim=0)
+                        print('mse:', MSE.shape)
                         rmse_loss += torch.sqrt(MSE.mean()).item()
+                        print('ens. mse:',ensemble_MSE.shape) 
+                        ensemble_rmse_loss += torch.sqrt(ensemble_MSE.mean()).item()
 
             # Compute the average over the batches
             average_test_loss = test_loss / (batch + 1)
+            average_ensemble_test_loss = ensemble_test_loss / (batch + 1)
             print(f"\nEvaluation on Test Data\n------------------------")
             print("Average Test Loss:", average_test_loss)
             if RMSE:
                 average_rmse_loss = rmse_loss / (batch + 1)
+                average_ensemble_rmse_loss = ensemble_rmse_loss / (batch + 1)
                 if ENCE:
                     ence = calculate_ence(var_mse)
-                    return average_test_loss, average_rmse_loss, ence, epoch
-                return average_test_loss, average_rmse_loss, epoch
+                    ensemble_ence = calculate_ence(ensemble_var_mse)
+                    # ***SIDENOTE*** Go through returns with if statements and docstring 
+                    return average_test_loss, average_rmse_loss, ence, epoch, average_ensemble_test_loss, average_ensemble_rmse_loss, ensemble_ence, training_time
+                return average_test_loss, average_rmse_loss, epoch, average_ensemble_test_loss, average_ensemble_rmse_loss, training_time
             else:
-                return average_test_loss, epoch
+                return average_test_loss, epoch, average_ensemble_test_loss, training_time
 
 
     # Need to implement early stop and ENCE for naive ensemble type
@@ -571,10 +615,10 @@ def train_models_w_mean_var(
                 with torch.no_grad():
                     for batch, (X_test, y_test) in enumerate(test_loader):
                         mean_test, var_test = Model(X_test.expand(ensemble_size, 1))
-                        Model_test_loss += loss_fn(mean_test, y_test.expand(ensemble_size, 1), var_test).item()
+                        Model_test_loss += loss_fn(mean_test, y_test.unsqueeze(1).expand(batch_size, ensemble_size, 1), var_test).item()
                         # If True calculate RMSE
                         if RMSE:
-                            Model_rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.expand(ensemble_size, 1))).item()
+                            Model_rmse_loss += torch.sqrt(MSE_loss_fn(mean_test, y_test.unsqueeze(1).expand(batch_size, ensemble_size, 1))).item()
                     average_test_loss += Model_test_loss/ (batch+1)
                     if RMSE:
                         average_rmse_loss += Model_rmse_loss / (batch+1)
@@ -654,7 +698,7 @@ def train_and_save_results(
                         # Shall implement for Naive model
                         model = None
                     # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result, ENCE_result, epoch = train_models_w_mean_var(
+                    GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
                         model=model,
                         ensemble_type=model_name,
                         ensemble_size=ensemble_size,
@@ -686,8 +730,12 @@ def train_and_save_results(
                         'loss_fn': loss_fn.__class__.__name__,
                         'learning_rate': learning_rate,
                         'ENCE': ENCE_result,
+                        'ensemble_ENCE': ensemble_ence,
                         'GNLLL': GNLLL_result,
-                        'RMSE': rmse_result
+                        'ensemble_GNLLL': ensemble_GNLLL_result,
+                        'RMSE': rmse_result,
+                        'ensemble_RMSE': ensemble_rmse_result,
+                        'train_time': train_time
                     }
                     # Convert the results to a DataFrame
                     df_results = pd.DataFrame([results])
@@ -708,7 +756,7 @@ def train_and_save_results(
                 weight_decay = None 
                 for data_noise in data_noise_options:
                     # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result, ENCE_result,epoch = train_models_w_mean_var(
+                    GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
                         model=model,
                         ensemble_type=model_name,
                         ensemble_size=ensemble_size,
@@ -736,13 +784,17 @@ def train_and_save_results(
                         'hidden_units': hidden_units,
                         'weight_decay': weight_decay,
                         'data_noise': data_noise,
-                        'epochs': epoch,
+                        'epochs': epoch, # Epoch which model stopped training 
                         'optimizer': 'Adam',
                         'loss_fn': loss_fn.__class__.__name__,
                         'learning_rate': learning_rate,
                         'ENCE': ENCE_result,
+                        'ensemble_ENCE': ensemble_ence,
                         'GNLLL': GNLLL_result,
-                        'RMSE': rmse_result
+                        'ensemble_GNLLL': ensemble_GNLLL_result,
+                        'RMSE': rmse_result,
+                        'ensemble_RMSE': ensemble_rmse_result,
+                        'train_time': train_time
                     }
 
                     # Convert the results to a DataFrame
