@@ -69,7 +69,7 @@ def plot_predictive(data: np.ndarray, trajectories: np.ndarray, xs: np.ndarray, 
 
 def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray, ensemble_size: int, xs: np.ndarray, title: str = None) -> None:
     """
-    Plots predictive mean and variance with uncertainty bands given arrays of means and variances.
+    Plots predictive mean, aleatoric, epistemic and combined uncertainty bands given arrays of means and variances.
 
     Parameters:
     - data (np.ndarray): Data points for scatter plot.
@@ -87,24 +87,46 @@ def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray
     
     blue = sns.color_palette()[0]
     red = sns.color_palette()[3]
+    black = 'black'
 
     plt.figure(figsize=(9., 7.))
     
     plt.plot(data[:, 0], data[:, 1], "o", color=red, alpha=0.7, markeredgewidth=1., markeredgecolor="k")
     
-    # Calculate overall mean and standard deviation
     mu = np.mean(means, axis=0)
-    sigma = np.sqrt(np.mean(variances, axis=0))  # Convert variance to standard deviation
+    aleatoric_uncertainty = np.sum(variances, axis=0) / ensemble_size
+    epistemic_uncertainty = (1/ensemble_size*np.sum(means**2,axis=0))-(1/ensemble_size*np.sum(means,axis=0))**2
+    sigma = np.sqrt(aleatoric_uncertainty)
 
-    plt.plot(xs, mu, "-", lw=2., color=blue)
+    plt.plot(xs, mu, "-", lw=1., color=black)
     plt.plot(xs, mu-3 * sigma, "-", lw=0.75, color=blue)
     plt.plot(xs, mu+3 * sigma, "-", lw=0.75, color=blue)
-        
-    plt.fill_between(xs, mu-3*sigma, mu+3*sigma, alpha=0.35, color=blue)
+    plt.fill_between(xs, mu-3*sigma, mu+3*sigma, alpha=0.5, color=blue)
+
+    plt.plot(xs, mu, "-", lw=2., color=black)
+    plt.plot(xs, mu-3 * np.sqrt(epistemic_uncertainty), "--", lw=0.75, color=blue)
+    plt.plot(xs, mu+3 * np.sqrt(epistemic_uncertainty), "--", lw=0.75, color=blue)
+    plt.fill_between(xs, mu-3*np.sqrt(epistemic_uncertainty), mu+3*np.sqrt(epistemic_uncertainty), alpha=0.7, color=blue, hatch='+++')
+
+    combined_uncertainty = np.sqrt(aleatoric_uncertainty) + np.sqrt(epistemic_uncertainty)
+    plt.plot(xs, mu, "-", lw=1., color=black)
+    plt.plot(xs, mu-3 * combined_uncertainty, "-", lw=0.75, color=red)
+    plt.plot(xs, mu+3 * combined_uncertainty, "-", lw=0.75, color=red)
+    plt.fill_between(xs, mu-3*combined_uncertainty, mu+3*combined_uncertainty, alpha=0.10, color=red)
 
     plt.xlim([np.min(xs), np.max(xs)])
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
+
+    # Create custom artists for the legend
+    aleatoric_patch = mpatches.Patch(color=blue, alpha=0.5, label='Aleatoric Uncertainty')
+    epistemic_patch = mpatches.Patch(color=blue, alpha=0.7, hatch='+++', label='Epistemic Uncertainty')
+    combined_patch = mpatches.Patch(color=red, alpha=0.10, label='Combined Uncertainty')
+    mean_line = mlines.Line2D([], [], color=black, label='Combined mean') 
+
+    # Add these custom artists to the legend
+    plt.legend(handles=[aleatoric_patch, epistemic_patch, combined_patch, mean_line], fontsize=12)
+
     if title:
         plt.title(title, fontsize=16)
  
@@ -330,7 +352,6 @@ def calculate_ence(
 
     return calibration_error.item()
 
-    
 
 def train_models_w_mean_var(
     model: torch.nn.Module,
