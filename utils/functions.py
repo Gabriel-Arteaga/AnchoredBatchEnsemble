@@ -11,6 +11,7 @@ from typing import Union, Optional, Tuple
 import torch
 from torch import nn
 import pandas as pd
+import copy
 import time
 from torch.utils.tensorboard import SummaryWriter
 from utils.models import BatchEnsemble, AnchoredBatchEnsemble
@@ -434,6 +435,9 @@ def train_models_w_mean_var(
     if RMSE:
         MSE_loss_fn = nn.MSELoss(reduction='none')
     
+    # Initiate a variable to track best model performance
+    best_loss = None
+
     # Record the start time for training
     start_time_training = time.time()
 
@@ -482,6 +486,11 @@ def train_models_w_mean_var(
                     mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
                     test_loss += loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1), var_test).item()
                 average_test_loss = test_loss / (batch + 1)
+                if best_loss is None or average_test_loss < best_loss:
+                    # Update model's best performance
+                    best_loss= average_test_loss
+                    # Save the model's weights w/ best performance
+                    best_model = copy.deepcopy(model.state_dict())
             # Save information to tensorboard
             if writer != None:
                 writer.add_scalar('Loss/train', train_loss/(batch+1), epoch)
@@ -509,6 +518,8 @@ def train_models_w_mean_var(
         training_time = end_time_training-start_time_training-test_time
 
         if test and test_loader is not None:
+            # Load the weights w/ the best performance
+            model.load_state_dict(best_model)
             model.eval()
             test_loss = 0
             ensemble_test_loss = 0
