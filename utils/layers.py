@@ -51,7 +51,7 @@ class BatchLinear(Module):
     weight: Tensor
 
     def __init__(self,ensemble_size: int , in_features: int, out_features: int, bias: bool = True,
-                 device=None, dtype=None) -> None:
+                 device=None, dtype=None, old_bias:bool=False, expand:bool=True, mode: str='fan_in') -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         # Ensemble Size
@@ -60,6 +60,16 @@ class BatchLinear(Module):
         self.in_features = in_features
         # Output Dimension
         self.out_features = out_features
+
+        # Whether to initialize bias with Torch's default way or not
+        self.old_bias = old_bias
+
+        # Initialize w/ fan_in or fan_out method?
+        assert mode in ['fan_in', 'fan_out'], "Invalid mode. Mode must be 'fan_in' or 'fan_out'."
+        self.mode = mode
+
+        # Whether to do the forward pass with expand functionality
+        self.expand = expand
 
         # Initiate the Shared Weight Matrix
         self.weight = Parameter(torch.empty((in_features, out_features), **factory_kwargs))
@@ -74,39 +84,60 @@ class BatchLinear(Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
-
         # Calculate the standard deviation 
-        fan = init._calculate_correct_fan(self.weight, mode='fan_out')
+        fan = init._calculate_correct_fan(self.weight, mode=self.mode)
         gain = init.calculate_gain(nonlinearity='relu')
-        self.std = gain / math.sqrt(fan)
-        # Initialize r and s vectors with same parameters as the weight matrix
+        std = gain / math.sqrt(fan)
+        # Initialize bias parameter
+        if self.bias is not None:
+            with torch.no_grad():
+                if self.old_bias:
+                    bound = 1 / math.sqrt(fan) if fan > 0 else 0
+                    init.uniform_(self.bias, -bound, bound)
+                else:
+                    self.bias.normal_(0,std)
+
+        # Initialize the weights
         with torch.no_grad():
-            self.r.normal_(0, self.std)
-            self.s.normal_(0, self.std)
-        
-        if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            init.uniform_(self.bias, -bound, bound)
-
+            self.weight.normal_(0, std)
+            self.r.normal_(0, std)
+            self.s.normal_(0, std)       
+            
     def forward(self, input: Tensor) -> Tensor:
-        # Calculate the batch size
-        batch_size = input.shape[0]//self.ensemble_size
+        if self.expand:
+            # Calculate the batch size
+            batch_size = input.shape[0]
 
-        # Repeat the fast weights so that it fits the batch_size appropritaely
-        R = self.r.repeat_interleave(batch_size,dim=0)
-        S = self.s.repeat_interleave(batch_size,dim=0)
+            # Repeat the fast weights so that it fits the batch_size appropritaely
+            R = self.r.unsqueeze(0).expand(batch_size, -1, -1)
+            S = self.s.unsqueeze(0).expand(batch_size, -1, -1)
+            weight = self.weight.unsqueeze(0).expand(batch_size,-1, -1)
 
-        # Perform the forward pass according to Equation 5 in BatchEnsemble
-        output = torch.mm((input*R), self.weight) * S
+            # Perform the forward pass according to Equation 5 in BatchEnsemble
+            output = torch.bmm(input*R, weight)*S
 
-        # If bias, add it to the output
-        if self.bias is not None:
-            bias = self.bias.repeat_interleave(batch_size, dim=0)
-            output += bias
-        return output
-        
+            # If bias, add it to the output
+            if self.bias is not None:
+                bias = self.bias.unsqueeze(0).expand(batch_size,-1,-1)
+                output += bias
+            return output
+        else:
+            # Calculate the batch size
+            batch_size = input.shape[0]//self.ensemble_size
+
+            # Repeat the fast weights so that it fits the batch_size appropritaely
+            R = self.r.repeat_interleave(batch_size,dim=0)
+            S = self.s.repeat_interleave(batch_size,dim=0)
+
+            # Perform the forward pass according to Equation 5 in BatchEnsemble
+            output = torch.mm((input*R), self.weight) * S
+
+            # If bias, add it to the output
+            if self.bias is not None:
+                bias = self.bias.repeat_interleave(batch_size, dim=0)
+                output += bias
+            return output
+            
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
     
@@ -182,8 +213,8 @@ class AnchoredBatch(Module):
     out_features: int
     weight: Tensor
 
-    def __init__(self,ensemble_size: int , in_features: int, out_features: int, bias: bool = True,
-                 device=None, dtype=None) -> None:
+    def __init__(self,ensemble_size: int , in_features: int, out_features: int, bias: bool = True, is_first_layer: bool=False,
+                 device=None, dtype=None, old_bias:bool=False, expand:bool=True, mode: str='fan_in') -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         # Ensemble Size
@@ -192,6 +223,19 @@ class AnchoredBatch(Module):
         self.in_features = in_features
         # Output Dimension
         self.out_features = out_features
+
+        # Initialize with Torch's native bias setting or not? (uniform)
+        self.old_bias = old_bias
+
+        # Whether to use expand functionality
+        self.expand = expand
+        
+        # Initialize w/ fan_in or fan_out method?
+        assert mode in ['fan_in', 'fan_out'], "Invalid mode. Mode must be 'fan_in' or 'fan_out'."
+        self.mode = mode
+
+        # Whether it's the first layer or not
+        self.is_first_layer = is_first_layer
 
         # Prior mean
         self.mean = 0
@@ -220,21 +264,34 @@ class AnchoredBatch(Module):
         Instead of using Kaiming Uniform initailization which is default for Linear module we instead use Kaiming Normal.
         This allows us to use the mean and standard deviation of the weight initialization as our prior for our anchored ensemble.  
         """
-        init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
-
         # Calculate the standard deviation 
-        fan = init._calculate_correct_fan(self.weight, mode='fan_out')
+        fan = init._calculate_correct_fan(self.weight, mode=self.mode)
         gain = init.calculate_gain(nonlinearity='relu')
-        self.std = gain / math.sqrt(fan)
-        # Initialize r and s vectors with same parameters as the weight matrix
-        with torch.no_grad():
-            self.r.normal_(0, self.std)
-            self.s.normal_(0, self.std)
-
+        std = gain / math.sqrt(fan)
+        # Initialize bias parameter
         if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            init.uniform_(self.bias, -bound, bound)
+            # Initialize bias using Kaiming Normal Initialization
+            with torch.no_grad():
+                if self.old_bias:
+                    bound = 1 / math.sqrt(fan) if fan > 0 else 0
+                    init.uniform_(self.bias, -bound, bound)
+                else:
+                    self.bias.normal_(0,std)
+
+        # If it is the first layer the weight's variance should be bias_variance/input_shape
+        if self.is_first_layer:
+            self.std = math.sqrt((std**2)/self.in_features)
+
+        # If it's not first layer, use same variance for bias to the shared and fast weights (Kaiming Init.)
+        else:
+            self.std=std 
+
+        # Initialize the weights
+        with torch.no_grad():
+            self.weight.normal_(0, self.std)
+            self.r.normal_(0, self.std)
+            self.s.normal_(0, self.std)     
+     
         
     def set_anchors(self):
         # Draw anchor points for each ensemble member using the prior mean and std
@@ -242,21 +299,41 @@ class AnchoredBatch(Module):
             self.anchors[ensemble_index] = torch.normal(mean=self.mean, std = self.std, size =(self.in_features, self.out_features))
 
     def forward(self, input: Tensor) -> Tensor:
-        # Calculate the batch size
-        batch_size = input.shape[0]//self.ensemble_size
+        if self.expand:
+            # Calculate the batch size
+            batch_size = input.shape[0]
 
-        # Repeat the fast weights so that it fits the batch_size appropritaely
-        R = self.r.repeat_interleave(batch_size,dim=0)
-        S = self.s.repeat_interleave(batch_size,dim=0)
+            # Repeat the fast weights so that it fits the batch_size appropritaely
+            R = self.r.unsqueeze(0).expand(batch_size, -1, -1)
+            S = self.s.unsqueeze(0).expand(batch_size, -1, -1)
+            weight = self.weight.unsqueeze(0).expand(batch_size,-1, -1)
 
-        # Perform the forward pass according to Equation 5 in BatchEnsemble
-        output = torch.mm((input*R), self.weight) * S
+            # Perform the forward pass according to Equation 5 in BatchEnsemble
+            output = torch.bmm(input*R, weight)*S
 
-        # If bias, add it to the output
-        if self.bias is not None:
-            bias = self.bias.repeat_interleave(batch_size, dim=0)
-            output += bias
-        return output
+            # If bias, add it to the output
+            if self.bias is not None:
+                bias = self.bias.unsqueeze(0).expand(batch_size,-1,-1)
+                output += bias
+            return output
+        else:
+            # Calculate the batch size
+            batch_size = input.shape[0]//self.ensemble_size
+
+            # Repeat the fast weights so that it fits the batch_size appropritaely
+            R = self.r.repeat_interleave(batch_size,dim=0)
+            S = self.s.repeat_interleave(batch_size,dim=0)
+
+            # Perform the forward pass according to Equation 5 in BatchEnsemble
+            output = torch.mm((input*R), self.weight) * S
+
+            # If bias, add it to the output
+            if self.bias is not None:
+                bias = self.bias.repeat_interleave(batch_size, dim=0)
+                output += bias
+            return output
+    
+    
     
     def get_reg_term(self, N: int, data_noise: float):
         """
