@@ -310,8 +310,8 @@ def calculate_uncertainties(means: torch.Tensor, variances: torch.Tensor, ensemb
     - total_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing total uncertainty.
     """
     # Compute the different uncertainties
-    aleatoric_uncertainty = torch.sum(var, axis=1) / ensemble_size
-    epistemic_uncertainty = (1/ensemble_size*torch.sum(mean**2,axis=1))-(1/ensemble_size*torch.sum(mean,axis=1))**2
+    aleatoric_uncertainty = torch.sum(variances, axis=1) / ensemble_size
+    epistemic_uncertainty = (1/ensemble_size*torch.sum(means**2,axis=1))-(1/ensemble_size*torch.sum(means,axis=1))**2
     total_uncertainty = aleatoric_uncertainty+epistemic_uncertainty
 
     return aleatoric_uncertainty, epistemic_uncertainty, total_uncertainty
@@ -331,6 +331,7 @@ def train_models_w_mean_var(
     RMSE: bool=False,
     ENCE: bool=False,
     early_stopping: bool=False,
+    calibration_metrics: bool=False,
     patience: int=10,
     min_delta: float=0.0,
     learning_rate: Optional[float]=0.001,
@@ -351,6 +352,7 @@ def train_models_w_mean_var(
         test_loader (Optional[torch.utils.data.DataLoader]): DataLoader providing test data (default is None).
         test (bool): True or False, Shall we measure on test data,
         early_stopping (bool): Do we want to use early_stopping to reduce overfitting? 
+        calibration_metrics (bool): If true returns MPIW and PICP metrics
         patience (int): Number of turns with no improvement until early stopping is triggered (default is 10). 
         min_delta (float): Minimum change in validation loss to be considered an improvement (default is 0.0)
         RMSE (bool): If True will calculate RMSE
@@ -456,47 +458,35 @@ def train_models_w_mean_var(
             model.eval()
             test_loss = 0
             ensemble_test_loss = 0
+            if calibration_metrics:
+                # Initialize variables for calculating PICP and MPIW
+                n = 0
+                pic = 0.0
+                piw = 0.0
             # If True initiate MSE Loss
             if RMSE:
                 rmse_loss = 0
                 ensemble_rmse_loss = 0
-                '''
-                Not working properly
-                if ENCE:
-                    # Initiate empty tensors will store variance in first column and MSE in the second column
-                    var_mse = torch.Tensor().to(device)
-                    ensemble_var_mse = torch.Tensor().to(device)
-                '''
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
                     mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
                     test_loss += loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1), var_test).item()
                     
                     # Calculate combined ensemble's loss
-                    #aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
+                    aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
                     # Made changes to calculate uncertainties, should return tensors of size (batch_size, 1) now instead of (batch_size)
                     ensemble_mean = torch.mean(mean_test, dim=1)
-                    ensemble_test_loss += loss_fn(ensemble_mean, y_test, combined_uncertainty.item())
+                    # Might be something fishy with combined_uncertainty dimensions with changes made look up
+                    ensemble_test_loss += loss_fn(ensemble_mean, y_test, combined_uncertainty)
 
                     # If True Calculate the RMSE
                     if RMSE:
                         MSE = MSE_loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1))
                         ensemble_MSE = MSE_loss_fn(ensemble_mean, y_test)
-                        '''
-                        Not working properly
-                        if ENCE:
-                            # Gather the predicted standard deviation of model and its corresponding RMSE
-                            batch_result = torch.stack((var_test.reshape(-1,1).squeeze(), MSE.reshape(-1,1).squeeze()), dim = 1)
-                            # Verify shapes
-                            ensemble_batch_result = torch.stack((combined_uncertainty, ensemble_MSE.squeeze()), dim=1)
-
-                            # Append the batch result
-                            var_mse = torch.cat((var_mse, batch_result), dim = 0)
-                            ensemble_var_mse = torch.cat((ensemble_var_mse, ensemble_batch_result), dim=0)
-                        '''
-
                         rmse_loss += torch.sqrt(MSE.mean()).item()
                         ensemble_rmse_loss += torch.sqrt(ensemble_MSE.mean()).item()
+                    if calibration_metrics:
+                        pic,piw, n = calculate_PIC_PIW(pic,piw, n, ensemble_mean, combined_uncertainty, y_test)
 
             # Compute the average over the batches
             average_test_loss = test_loss / (batch + 1)
@@ -506,13 +496,16 @@ def train_models_w_mean_var(
             if RMSE:
                 average_rmse_loss = rmse_loss / (batch + 1)
                 average_ensemble_rmse_loss = ensemble_rmse_loss / (batch + 1)
-                if ENCE:
-                    ence = calculate_ence(var_mse)
-                    ensemble_ence = calculate_ence(ensemble_var_mse)
-                    # ***SIDENOTE*** Go through returns with if statements and docstring 
-                    return average_test_loss, average_rmse_loss, ence, epoch, average_ensemble_test_loss, average_ensemble_rmse_loss, ensemble_ence, training_time
+                if calibration_metrics:
+                    # Calculate Prediction Interval Coverage Probabiblity (PICP)
+                    PICP = pic/n
+                    # Calculate Mean Prediction Interval Width (MPIW)
+                    MPIW = piw/n
+                    return average_test_loss, average_rmse_loss, epoch, average_ensemble_test_loss, average_ensemble_rmse_loss, training_time, PICP, MPIW
                 return average_test_loss, average_rmse_loss, epoch, average_ensemble_test_loss, average_ensemble_rmse_loss, training_time
             else:
+                if calibration_metrics:
+                    return average_test_loss, epoch, average_ensemble_test_loss, training_time, PICP, MPIW 
                 return average_test_loss, epoch, average_ensemble_test_loss, training_time
 
 
