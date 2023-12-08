@@ -16,6 +16,7 @@ import time
 from torch.utils.tensorboard import SummaryWriter
 from utils.models import BatchEnsemble, AnchoredBatchEnsemble
 from utils.classes import EarlyStopping
+from utils.metrics import calculate_PIC_PIW
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Prediction function orginally created by wjmaddox\drbayes
@@ -138,23 +139,6 @@ def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray
         plt.title(title, fontsize=16)
 
 
-def compute_z_score(pred_interval: float) -> float:
-    """
-    Compute the z-score based on a given prediction interval.
-
-    Parameters:
-    - pred_interval (float): Prediction interval in the range (0, 100).
-
-    Returns:
-    float: The z-score corresponding to the given prediction interval.
-    """
-    # Convert pred_interval to a probability
-    probability = pred_interval / 100
-
-    # Compute z-score based on the probability
-    z = norm.ppf((1 + probability) / 2)
-    
-    return z
  
 def train_models(
     model: torch.nn.Module,
@@ -309,74 +293,6 @@ def train_models(
                 
             return average_test_loss
 
-def calculate_ence(
-    var_and_mse:torch.Tensor,
-    num_bins: int=10
-):
-    """
-    Calculate the Expected Normalized Calibration Error (ENCE) for a regression calibration evaluation[^1^][1].
-
-    Parameters:
-    var_and_mse (torch.Tensor): A tensor of variances and mean squared errors.
-    num_bins (int): The number of bins to use for the calculation.
-
-    Returns:
-    float: The ENCE value.
-    """
-
-    # Initialize the ENCE value
-    calibration_error = 0
-
-    # Get the total number of data points
-    N = len(var_and_mse)
-
-    # Get the minimum and maximum variances
-    min_var = torch.min(var_and_mse[:,0])
-    max_var = torch.max(var_and_mse[:,0])
-
-    # Arrange bin ranges uniformly 
-    bin_ranges = torch.linspace(min_var, max_var, num_bins)
-
-    # Sort the values
-    var_and_mse = torch.sort(var_and_mse,dim=0)[0]
-
-    # Initialize the index for the sorted tensor
-    bin_start_index = 0
-
-    # Iterate over the bin ranges
-    for max_var in bin_ranges[1:]:
-        # Initialize the cardinality of the bin
-        num_in_bin = 0
-
-        # Initialize variables to store the mean squared error and variance of each bin
-        bin_mse = 0
-        bin_var = 0
-
-        # Iterate over the variances and mean squared errors
-        for var, mse in zip(var_and_mse[bin_start_index:,0], var_and_mse[bin_start_index:,1]):
-            # Accumulate the mean squared error and variance of each bin, count the cardinality of the bin
-            if var <= max_var:
-                bin_mse += mse
-                bin_var  += var
-                num_in_bin += 1
-                bin_start_index += 1
-            else:
-                # We have gone through all elements in the bin
-                break
-        
-        # Ensure no division by zero
-        if num_in_bin != 0:
-            # Calculate the root mean square error and mean variance of each bin
-            rmse = torch.sqrt(bin_mse / num_in_bin)
-            mean_var = torch.sqrt(bin_var / num_in_bin)
-
-            # Add each bin score to the final ENCE variable
-            calibration_error += torch.abs(mean_var - rmse) / mean_var
-
-    # Normalize the ENCE with the number of data points
-    calibration_error /= N
-
-    return calibration_error.item()
 
 
 def calculate_uncertainties(means: torch.Tensor, variances: torch.Tensor, ensemble_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -393,10 +309,6 @@ def calculate_uncertainties(means: torch.Tensor, variances: torch.Tensor, ensemb
     - epistemic_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing epistemic uncertainty.
     - total_uncertainty (torch.Tensor): Tensor of shape (data_size,) representing total uncertainty.
     """
-    # Reshape the tensors to (ensemble_size, data_size)
-    mean = means.squeeze()
-    var = variances.squeeze()
-
     # Compute the different uncertainties
     aleatoric_uncertainty = torch.sum(var, axis=1) / ensemble_size
     epistemic_uncertainty = (1/ensemble_size*torch.sum(mean**2,axis=1))-(1/ensemble_size*torch.sum(mean,axis=1))**2
@@ -548,32 +460,40 @@ def train_models_w_mean_var(
             if RMSE:
                 rmse_loss = 0
                 ensemble_rmse_loss = 0
+                '''
+                Not working properly
                 if ENCE:
                     # Initiate empty tensors will store variance in first column and MSE in the second column
                     var_mse = torch.Tensor().to(device)
                     ensemble_var_mse = torch.Tensor().to(device)
+                '''
             with torch.no_grad():
                 for batch, (X_test, y_test) in enumerate(test_loader):
                     mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
                     test_loss += loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1), var_test).item()
                     
                     # Calculate combined ensemble's loss
-                    aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
+                    #aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
+                    # Made changes to calculate uncertainties, should return tensors of size (batch_size, 1) now instead of (batch_size)
                     ensemble_mean = torch.mean(mean_test, dim=1)
-                    ensemble_test_loss += loss_fn(ensemble_mean, y_test, combined_uncertainty.unsqueeze(1)).item()
+                    ensemble_test_loss += loss_fn(ensemble_mean, y_test, combined_uncertainty.item())
 
                     # If True Calculate the RMSE
                     if RMSE:
                         MSE = MSE_loss_fn(mean_test, y_test.unsqueeze(1).expand(-1, ensemble_size, -1))
                         ensemble_MSE = MSE_loss_fn(ensemble_mean, y_test)
+                        '''
+                        Not working properly
                         if ENCE:
                             # Gather the predicted standard deviation of model and its corresponding RMSE
                             batch_result = torch.stack((var_test.reshape(-1,1).squeeze(), MSE.reshape(-1,1).squeeze()), dim = 1)
+                            # Verify shapes
                             ensemble_batch_result = torch.stack((combined_uncertainty, ensemble_MSE.squeeze()), dim=1)
 
                             # Append the batch result
                             var_mse = torch.cat((var_mse, batch_result), dim = 0)
                             ensemble_var_mse = torch.cat((ensemble_var_mse, ensemble_batch_result), dim=0)
+                        '''
 
                         rmse_loss += torch.sqrt(MSE.mean()).item()
                         ensemble_rmse_loss += torch.sqrt(ensemble_MSE.mean()).item()
