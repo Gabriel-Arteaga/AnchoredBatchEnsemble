@@ -72,7 +72,7 @@ def plot_predictive(data: np.ndarray, trajectories: np.ndarray, xs: np.ndarray, 
     if title:
         plt.title(title, fontsize=16)
 
-def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray, ensemble_size: int, xs: np.ndarray, title: str = None) -> None:
+def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray, ensemble_size: int, xs: np.ndarray, title: str = None, pred_interval: float=99.7) -> None:
     """
     Plots predictive mean, aleatoric, epistemic and combined uncertainty bands given arrays of means and variances.
 
@@ -83,10 +83,12 @@ def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray
     - ensemble_size (int): Number of ensemble members.
     - xs (np.ndarray): X-axis values for the trajectories.
     - title (str, optional): Title for the plot.
+    - pred_interval (float): Prediction interval in interval should be a float in range (0,100). Default (99.7)
 
     Returns:
     None
     """
+    z = compute_z_score(pred_interval)
     sns.set_style('darkgrid')
     palette = sns.color_palette('colorblind')
     
@@ -104,20 +106,20 @@ def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray
     sigma = np.sqrt(aleatoric_uncertainty)
 
     plt.plot(xs, mu, "-", lw=1., color=black)
-    plt.plot(xs, mu-3 * sigma, "-", lw=0.75, color=blue)
-    plt.plot(xs, mu+3 * sigma, "-", lw=0.75, color=blue)
-    plt.fill_between(xs, mu-3*sigma, mu+3*sigma, alpha=0.5, color=blue)
+    plt.plot(xs, mu-z * sigma, "-", lw=0.75, color=blue)
+    plt.plot(xs, mu+z * sigma, "-", lw=0.75, color=blue)
+    plt.fill_between(xs, mu-z*sigma, mu+z*sigma, alpha=0.5, color=blue)
 
     plt.plot(xs, mu, "-", lw=2., color=black)
-    plt.plot(xs, mu-3 * np.sqrt(epistemic_uncertainty), "--", lw=0.75, color=blue)
-    plt.plot(xs, mu+3 * np.sqrt(epistemic_uncertainty), "--", lw=0.75, color=blue)
-    plt.fill_between(xs, mu-3*np.sqrt(epistemic_uncertainty), mu+3*np.sqrt(epistemic_uncertainty), alpha=0.7, color=blue, hatch='+++')
+    plt.plot(xs, mu-z * np.sqrt(epistemic_uncertainty), "--", lw=0.75, color=blue)
+    plt.plot(xs, mu+z * np.sqrt(epistemic_uncertainty), "--", lw=0.75, color=blue)
+    plt.fill_between(xs, mu-z*np.sqrt(epistemic_uncertainty), mu+z*np.sqrt(epistemic_uncertainty), alpha=0.7, color=blue, hatch='+++')
 
     combined_uncertainty = np.sqrt(aleatoric_uncertainty) + np.sqrt(epistemic_uncertainty)
     plt.plot(xs, mu, "-", lw=1., color=black)
-    plt.plot(xs, mu-3 * combined_uncertainty, "-", lw=0.75, color=red)
-    plt.plot(xs, mu+3 * combined_uncertainty, "-", lw=0.75, color=red)
-    plt.fill_between(xs, mu-3*combined_uncertainty, mu+3*combined_uncertainty, alpha=0.10, color=red)
+    plt.plot(xs, mu-z * combined_uncertainty, "-", lw=0.75, color=red)
+    plt.plot(xs, mu+z * combined_uncertainty, "-", lw=0.75, color=red)
+    plt.fill_between(xs, mu-z*combined_uncertainty, mu+z*combined_uncertainty, alpha=0.10, color=red)
 
     plt.xlim([np.min(xs), np.max(xs)])
     plt.xticks(fontsize=12)
@@ -134,6 +136,25 @@ def plot_predictive_2(data: np.ndarray, means: np.ndarray, variances: np.ndarray
 
     if title:
         plt.title(title, fontsize=16)
+
+
+def compute_z_score(pred_interval: float) -> float:
+    """
+    Compute the z-score based on a given prediction interval.
+
+    Parameters:
+    - pred_interval (float): Prediction interval in the range (0, 100).
+
+    Returns:
+    float: The z-score corresponding to the given prediction interval.
+    """
+    # Convert pred_interval to a probability
+    probability = pred_interval / 100
+
+    # Compute z-score based on the probability
+    z = norm.ppf((1 + probability) / 2)
+    
+    return z
  
 def train_models(
     model: torch.nn.Module,
@@ -660,6 +681,7 @@ def train_and_save_results(
         RMSE: bool = True,
         ENCE: bool = True,
         learning_rate: Optional[float] = 0.001,
+        tensorboard_directory: Optional[str] = 'runs',
         device: torch.device = device
 ) -> None:
     """
@@ -691,6 +713,7 @@ def train_and_save_results(
     # Create a path string
     directory_path = '..\\results'
     csv_file_path = os.path.join(directory_path, csv_file)
+    tensorboard_path = os.path.join(directory_path, tensorboard_directory)
 
     # Initialize a dict to store the results
     results = {}
@@ -763,8 +786,8 @@ def train_and_save_results(
                 model = AnchoredBatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
                 weight_decay = None 
                 for data_noise in data_noise_options:
-                    comment = f'model={model_name} hidden_units={hidden_units} hidden_layers={hidden_layers} data_noise={data_noise}'
-                    writer = SummaryWriter(comment=comment)
+                    comment = f'model={model_name} hidden_units={hidden_units} hidden_layers={hidden_layers} data_noise={data_noise} epochs={epochs}'
+                    writer = SummaryWriter(log_dir=tensorboard_path,comment=comment)
                     # Train the model and get the average loss on test data
                     GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
                         model=model,
@@ -787,7 +810,7 @@ def train_and_save_results(
                         device=device
                     )
 
-                    writer.add_hparams({'data_noise': data_noise, 'h_units': hidden_units, 'h_layers': hidden_layers}, 
+                    writer.add_hparams({'data_noise': data_noise, 'h_units': hidden_units, 'h_layers': hidden_layers, 'epochs':epochs}, 
                                        {'GNLLLoss':GNLLL_result, 'Ens.GNLLLoss': ensemble_GNLLL_result, 'RMSE': rmse_result, 'Ens.RMSE': ensemble_rmse_result, 
                                         'ENCE': ENCE_result, 'Ens.ENCE': ensemble_ence})
                     writer.close()
