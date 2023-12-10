@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
+from itertools import product
 import seaborn as sns
 from typing import Union, Optional, Tuple
 import torch
@@ -16,7 +17,7 @@ import time
 from torch.utils.tensorboard import SummaryWriter
 from utils.models import BatchEnsemble, AnchoredBatchEnsemble
 from utils.classes import EarlyStopping
-from utils.metrics import calculate_PIC_PIW
+from utils.metrics import calculate_PIC_PIW, compute_z_score
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Prediction function orginally created by wjmaddox\drbayes
@@ -587,12 +588,13 @@ def train_and_save_results(
         epochs: int,
         csv_file: str,
         print_frequency: Optional[int] = 500,
+        dropout_prob_options: Optional[list] = None,
         weight_decay_options: Optional[list] = None,
         data_noise_options: Optional[list] = None,
         test: bool = True,
         early_stopping: bool =True,
         RMSE: bool = True,
-        ENCE: bool = True,
+        calibration_metrics: bool=True,
         learning_rate: Optional[float] = 0.001,
         tensorboard_directory: Optional[str] = 'runs',
         device: torch.device = device
@@ -624,142 +626,140 @@ def train_and_save_results(
     None: The results are saved to the specified CSV file.
     """
     # Create a path string
-    directory_path = '..\\results'
+    directory_path = '..\\..\\results'
     csv_file_path = os.path.join(directory_path, csv_file)
     tensorboard_path = os.path.join(directory_path, tensorboard_directory)
 
     # Initialize a dict to store the results
     results = {}
     # Loop over the configurations
-    for hidden_layers in hidden_layers_options:
-        for hidden_units in hidden_units_options:
-            if weight_decay_options != None:
-                data_noise = None
-                for weight_decay in weight_decay_options:
-                    if model_name == 'batch':
-                        model = BatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
-                    else:
-                        # Shall implement for Naive model
-                        model = None
-                    # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
-                        model=model,
-                        ensemble_type=model_name,
-                        ensemble_size=ensemble_size,
-                        data_noise=data_noise,
-                        epochs=epochs,
-                        print_frequency=print_frequency,
-                        loss_fn=loss_fn,
-                        optimizer=optimizer,
-                        train_loader=train_loader,
-                        test_loader=test_loader,
-                        test=test,
-                        early_stopping=early_stopping,
-                        RMSE=RMSE,
-                        ENCE=ENCE,
-                        learning_rate=learning_rate,
-                        weight_decay=weight_decay,
-                        device=device
-                    )
-                    # Save result in a dict
-                    results = {
-                        'model': model_name,
-                        'ensemble_size': ensemble_size,
-                        'hidden_layers': hidden_layers,
-                        'hidden_units': hidden_units,
-                        'weight_decay': weight_decay,
-                        'data_noise': data_noise,
-                        'epochs': epoch, # Epoch which model stopped training 
-                        'optimizer': 'Adam',
-                        'loss_fn': loss_fn.__class__.__name__,
-                        'learning_rate': learning_rate,
-                        'ENCE': ENCE_result,
-                        'ensemble_ENCE': ensemble_ence,
-                        'GNLLL': GNLLL_result,
-                        'ensemble_GNLLL': ensemble_GNLLL_result,
-                        'RMSE': rmse_result,
-                        'ensemble_RMSE': ensemble_rmse_result,
-                        'train_time': train_time
-                    }
-                    # Convert the results to a DataFrame
-                    df_results = pd.DataFrame([results])
+    for hidden_layers, hidden_units, dropout_prob in product(hidden_layers_options, hidden_units_options, dropout_prob_options):
+        if weight_decay_options != None:
+            data_noise = None
+            for weight_decay in weight_decay_options:
+                if model_name == 'batch':
+                    model = BatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
+                else:
+                    # Shall implement for Naive model
+                    model = None
+                # Train the model and get the average loss on test data
+                GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
+                    model=model,
+                    ensemble_type=model_name,
+                    ensemble_size=ensemble_size,
+                    data_noise=data_noise,
+                    epochs=epochs,
+                    print_frequency=print_frequency,
+                    loss_fn=loss_fn,
+                    optimizer=optimizer,
+                    train_loader=train_loader,
+                    test_loader=test_loader,
+                    test=test,
+                    early_stopping=early_stopping,
+                    RMSE=RMSE,
+                    learning_rate=learning_rate,
+                    weight_decay=weight_decay,
+                    device=device
+                )
+                # Save result in a dict
+                results = {
+                    'model': model_name,
+                    'ensemble_size': ensemble_size,
+                    'hidden_layers': hidden_layers,
+                    'hidden_units': hidden_units,
+                    'weight_decay': weight_decay,
+                    'data_noise': data_noise,
+                    'epochs': epoch, # Epoch which model stopped training 
+                    'optimizer': 'Adam',
+                    'loss_fn': loss_fn.__class__.__name__,
+                    'learning_rate': learning_rate,
+                    'ENCE': ENCE_result,
+                    'ensemble_ENCE': ensemble_ence,
+                    'GNLLL': GNLLL_result,
+                    'ensemble_GNLLL': ensemble_GNLLL_result,
+                    'RMSE': rmse_result,
+                    'ensemble_RMSE': ensemble_rmse_result,
+                    'train_time': train_time
+                }
+                # Convert the results to a DataFrame
+                df_results = pd.DataFrame([results])
 
-                    # Check if the CSV file exists
-                    try:
-                        # Load the existing CSV file
-                        df_existing = pd.read_csv(csv_file_path)
-                    except FileNotFoundError:
-                        # If the file doesn't exist, create a new DataFrame
-                        df_existing = pd.DataFrame()
+                # Check if the CSV file exists
+                try:
+                    # Load the existing CSV file
+                    df_existing = pd.read_csv(csv_file_path)
+                except FileNotFoundError:
+                    # If the file doesn't exist, create a new DataFrame
+                    df_existing = pd.DataFrame()
 
-                    # Save the combined DataFrame to the CSV file without rewriting the header
-                    df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
-            # If not weight decay, we are using AnchoredBatch
-            else:
-                model = AnchoredBatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units)
-                weight_decay = None 
-                for data_noise in data_noise_options:
-                    comment = f'model={model_name} hidden_units={hidden_units} hidden_layers={hidden_layers} data_noise={data_noise} epochs={epochs}'
-                    writer = SummaryWriter(log_dir=tensorboard_path,comment=comment)
-                    # Train the model and get the average loss on test data
-                    GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
-                        model=model,
-                        ensemble_type=model_name,
-                        ensemble_size=ensemble_size,
-                        data_noise=data_noise,
-                        epochs=epochs,
-                        print_frequency=print_frequency,
-                        loss_fn=loss_fn,
-                        optimizer=optimizer,
-                        train_loader=train_loader,
-                        test_loader=test_loader,
-                        test=test,
-                        early_stopping=early_stopping,
-                        RMSE=RMSE,
-                        ENCE=ENCE,
-                        learning_rate=learning_rate,
-                        weight_decay=weight_decay,
-                        writer=writer,
-                        device=device
-                    )
+                # Save the combined DataFrame to the CSV file without rewriting the header
+                df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
+        # If not weight decay, we are using AnchoredBatch
+        else:
+            model = AnchoredBatchEnsemble(ensemble_size=ensemble_size, input_shape=input_shape, hidden_layers=hidden_layers, hidden_units=hidden_units, dropout_prob=dropout_prob)
+            weight_decay = None 
+            for data_noise in data_noise_options:
+                comment = f'model={model_name} hidden_units={hidden_units} hidden_layers={hidden_layers} data_noise={data_noise} epochs={epochs} ens.size={ensemble_size} dropout_prob={dropout_prob}'
+                writer = SummaryWriter(comment=comment)
+                # Train the model and get the average loss on test data
+                GNLLL_result, rmse_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, train_time, PICP, MPIW = train_models_w_mean_var(
+                    model=model,
+                    ensemble_type=model_name,
+                    ensemble_size=ensemble_size,
+                    data_noise=data_noise,
+                    epochs=epochs,
+                    print_frequency=print_frequency,
+                    loss_fn=loss_fn,
+                    optimizer=optimizer,
+                    train_loader=train_loader,
+                    test_loader=test_loader,
+                    test=test,
+                    early_stopping=early_stopping,
+                    RMSE=RMSE,
+                    calibration_metrics=True,
+                    learning_rate=learning_rate,
+                    weight_decay=weight_decay,
+                    writer=writer,
+                    device=device
+                )
 
-                    writer.add_hparams({'data_noise': data_noise, 'h_units': hidden_units, 'h_layers': hidden_layers, 'epochs':epochs}, 
-                                       {'GNLLLoss':GNLLL_result, 'Ens.GNLLLoss': ensemble_GNLLL_result, 'RMSE': rmse_result, 'Ens.RMSE': ensemble_rmse_result, 
-                                        'ENCE': ENCE_result, 'Ens.ENCE': ensemble_ence})
-                    writer.close()
-                    # Save result in a dict
-                    results = {
-                        'model': model_name,
-                        'ensemble_size': ensemble_size,
-                        'hidden_layers': hidden_layers,
-                        'hidden_units': hidden_units,
-                        'weight_decay': weight_decay,
-                        'data_noise': data_noise,
-                        'epochs': epoch, # Epoch which model stopped training 
-                        'optimizer': 'Adam',
-                        'loss_fn': loss_fn.__class__.__name__,
-                        'learning_rate': learning_rate,
-                        'ENCE': ENCE_result,
-                        'ensemble_ENCE': ensemble_ence,
-                        'GNLLL': GNLLL_result,
-                        'ensemble_GNLLL': ensemble_GNLLL_result,
-                        'RMSE': rmse_result,
-                        'ensemble_RMSE': ensemble_rmse_result,
-                        'train_time': train_time
-                    }
+                writer.add_hparams({'data_noise': data_noise, 'h_units': hidden_units, 'h_layers': hidden_layers, 'epochs':epochs, 'ensemble_size':ensemble_size,'dropout_prob': dropout_prob}, 
+                                    {'GNLLLoss':GNLLL_result, 'Ens.GNLLLoss': ensemble_GNLLL_result, 'RMSE': rmse_result, 'Ens.RMSE': ensemble_rmse_result, 
+                                    'PICP': PICP, 'MPIW': MPIW})
+                writer.close()
+                # Save result in a dict
+                results = {
+                    'model': model_name,
+                    'ensemble_size': ensemble_size,
+                    'hidden_layers': hidden_layers,
+                    'hidden_units': hidden_units,
+                    'weight_decay': weight_decay,
+                    'data_noise': data_noise,
+                    'epochs': epoch, # Epoch which model stopped training 
+                    'optimizer': 'Adam',
+                    'loss_fn': loss_fn.__class__.__name__,
+                    'learning_rate': learning_rate,
+                    'PICP': PICP,
+                    'MPIW': MPIW,
+                    'GNLLL': GNLLL_result,
+                    'ensemble_GNLLL': ensemble_GNLLL_result,
+                    'RMSE': rmse_result,
+                    'ensemble_RMSE': ensemble_rmse_result,
+                    'train_time': train_time
+                }
 
-                    # Convert the results to a DataFrame
-                    df_results = pd.DataFrame([results])
+                # Convert the results to a DataFrame
+                df_results = pd.DataFrame([results])
 
-                    # Check if the CSV file exists
-                    try:
-                        # Load the existing CSV file
-                        df_existing = pd.read_csv(csv_file_path)
-                    except FileNotFoundError:
-                        # If the file doesn't exist, create a new DataFrame
-                        df_existing = pd.DataFrame()
+                # Check if the CSV file exists
+                try:
+                    # Load the existing CSV file
+                    df_existing = pd.read_csv(csv_file_path)
+                except FileNotFoundError:
+                    # If the file doesn't exist, create a new DataFrame
+                    df_existing = pd.DataFrame()
 
-                    # Save the combined DataFrame to the CSV file without rewriting the header
-                    df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
+                # Save the combined DataFrame to the CSV file without rewriting the header
+                df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
 
 
