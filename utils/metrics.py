@@ -19,7 +19,7 @@ def compute_z_score(pred_interval: float) -> float:
     
     return z
 
-def calculate_PIC_PIW(PIC:float, PIW:float, n:int, means:torch.Tensor, variances: torch.Tensor, y_true: torch.Tensor, pred_interval: float=90.0):
+def calculate_PIC_PIW(PIC:float, PIW:float, n:int, means:torch.Tensor, variances: torch.Tensor, y_true: torch.Tensor, pred_interval: float=95.0):
     """"
     Calculate Prediction Interval Coverage (PIC) and Prediction Interval Width (PIW) for a batch of predictions.
 
@@ -56,7 +56,6 @@ def calculate_PIC_PIW(PIC:float, PIW:float, n:int, means:torch.Tensor, variances
     below_upper_bound = y_pred_U > y_true
     # Calculate total number of data points captured for current batch and update
     # the Prediction Interval Coverage
-    captured_points = (above_lower_bound*below_upper_bound).sum().item()
     PIC += (above_lower_bound*below_upper_bound).sum().item()
     # Calculate the current batch's PI width and update the Prediction Interval Width (PIW)
     PIW += (y_pred_U-y_pred_L).sum().item()
