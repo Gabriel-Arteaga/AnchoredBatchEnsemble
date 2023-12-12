@@ -140,13 +140,11 @@ class BatchLinear(Module):
             
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
-    
 
-class ModifiedLinear(Module):
+class Kaiming_Linear(Module):
     """
-    A modified linear layer which uses Kaiming Normal Initialization. 
-    Stores mean and standard deviation of the initalization parameters.
-
+    A modified linear layer which uses Kaiming Normal Initialization for weight
+    and bias.
 
     Args:
         in_features: size of each input sample
@@ -161,12 +159,73 @@ class ModifiedLinear(Module):
     weight: Tensor
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
+                 mode: str = 'fan_in',
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        # Initialize w/ fan_in or fan_out method?
+        assert mode in ['fan_in', 'fan_out'], "Invalid mode. Mode must be 'fan_in' or 'fan_out'."
+        self.mode = mode
+
+        if bias:
+            self.bias = Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        # Calculate the standard deviation 
+        fan = init._calculate_correct_fan(self.weight, mode=self.mode)
+        gain = init.calculate_gain(nonlinearity='relu')
+        std = gain / math.sqrt(fan)
+        
+        with torch.no_grad():
+            # Initialize the weights
+            self.weight.normal_(0, std)
+            if self.bias is not None:
+                # Initialize bias parameter
+                self.bias.normal_(0,std)
+
+    def forward(self, input: Tensor) -> Tensor:
+        return F.linear(input, self.weight, self.bias)
+
+    def extra_repr(self) -> str:
+        return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
+
+
+class ModifiedLinear(Module):
+    """
+    A modified linear layer which uses Kaiming Normal Initialization. 
+    Stores mean and standard deviation of the initalization parameters which
+    represents prior for anchored regularization. 
+
+    Args:
+        in_features: size of each input sample
+        out_features: size of each output sample
+        bias: If set to ``False``, the layer will not learn an additive bias.
+            Default: ``True``
+
+    """
+    __constants__ = ['in_features', 'out_features']
+    in_features: int
+    out_features: int
+    weight: Tensor
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True,
+                 if_first_layer: bool = False, mode: str = 'fan_in',
+                 device=None, dtype=None) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+
+        assert mode in ['fan_in', 'fan_out'], "Invalid mode. Mode must be 'fan_in' or 'fan_out'."
+        self.mode = mode
+        self.if_first_layer = if_first_layer
         # Prior mean
         self.mean = 0
         # Prior standard deviation, will be calculatedin reset_parameters()
@@ -179,18 +238,25 @@ class ModifiedLinear(Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        #init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        # We use Kaiming Normal instead of Kaiming Uniform initialization
-        init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
-        if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            init.uniform_(self.bias, -bound, bound)
-        
-        # We calculate the standard deviation, which is the same std deviation used to initalize the weights
-        fan = init._calculate_correct_fan(self.weight, mode='fan_out')
+        # Calculate the standard deviation 
+        fan = init._calculate_correct_fan(self.weight, mode=self.mode)
         gain = init.calculate_gain(nonlinearity='relu')
-        self.std = gain / math.sqrt(fan)
+        std = gain / math.sqrt(fan)
+        # Initialize bias parameter
+        if self.bias is not None:
+            # Initialize bias using Kaiming Normal Initialization
+            with torch.no_grad():
+                self.bias.normal_(0,std)
+
+        # If it is the first layer the weight's variance should be bias_variance/input_shape
+        if self.is_first_layer:
+            self.std = math.sqrt((std**2)/self.in_features)
+        # If it's not first layer, use same variance for bias to the shared and fast weights (Kaiming Init.)
+        else:
+            self.std=std 
+        # Initialize the weight
+        with torch.no_grad():
+            self.weight.normal_(0, self.std)
 
     def forward(self, input: Tensor) -> Tensor:
         return F.linear(input, self.weight, self.bias)
@@ -332,7 +398,6 @@ class AnchoredBatch(Module):
                 bias = self.bias.repeat_interleave(batch_size, dim=0)
                 output += bias
             return output
-    
     
     
     def get_reg_term(self, N: int, data_noise: float):
