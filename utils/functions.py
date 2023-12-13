@@ -15,6 +15,7 @@ import pandas as pd
 import copy
 import time
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import TensorDataset, DataLoader
 from utils.models import BatchEnsemble, AnchoredBatchEnsemble
 from utils.classes import EarlyStopping
 from utils.metrics import calculate_PIC_PIW, compute_z_score
@@ -301,8 +302,8 @@ def calculate_uncertainties(means: torch.Tensor, variances: torch.Tensor, ensemb
     Calculate aleatoric, epistemic, and total uncertainties.
 
     Args:
-    - means (torch.Tensor): Tensor of shape (data_size,1) containing mean predictions.
-    - variances (torch.Tensor): Tensor of shape (data_size,1) containing model variances.
+    - means (torch.Tensor): Tensor of shape (data_size, ensemble_size, 1) containing mean predictions.
+    - variances (torch.Tensor): Tensor of shape (data_size, ensemble_size, 1) containing model variances.
     - ensemble_size (int): Number of ensemble members.
 
     Returns:
@@ -766,168 +767,6 @@ def train_and_save_results(
                 df_results.to_csv(csv_file_path, mode='a', header=not df_existing.shape[0], index=False)
 
 
-def train_ensemble_model(
-    model: torch.nn.Module,
-    ensemble_type: str,
-    ensemble_size: int,
-    epochs: int,
-    loss_fn: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    train_loader: torch.utils.data.DataLoader,
-    val_loader: Optional[torch.utils.data.DataLoader],
-    data_noise: Optional[float],
-    learning_rate: Optional[float]=0.001
-):
-    """
-    This function is used for the experiments.
-    Trains an ensemble model, returns best trained model and training time
-    """
-    # Initiate a variable to track best model performance
-    best_loss = None
-
-    # Record the start time for training
-    start_time_training = time.time()
-
-    if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
-        optimizer = optimizer(model.parameters(), lr=learning_rate)
-        model.to(device)
-
-        for epoch in range(epochs):
-            # Training
-            train_loss = 0
-            # Add a loop to loop through the training batches
-            for batch, (X, y) in enumerate(train_loader):
-                model.train()
-                batch_size = X.shape[0]
-                # 1. Perform forward pass
-                mean, var = model(X.unsqueeze(1).expand(-1, ensemble_size, -1))  # Make prediction
-
-                # 2. Calculate loss per batch
-                loss = loss_fn(mean, y.unsqueeze(1).expand(-1, ensemble_size, -1), var) 
-
-                train_loss += loss.item()  # Accumulate loss
-
-                if ensemble_type == 'anchored_batch':
-                    # Calculate regularization term
-                    reg_term = 0
-                    for layer in model.layer_stack.modules():
-                        # If layer is not an activation function, then it has weights
-                        if hasattr(layer, 'weight'):
-                            reg_term += layer.get_reg_term(batch_size, data_noise)
-                    loss += reg_term
-
-                # 3. Optimizer zero grad
-                optimizer.zero_grad()
-                # 4. Loss backward
-                loss.backward()
-                # 5. Optimizer step
-                optimizer.step()
-            
-
-            with torch.no_grad():
-                test_loss = 0
-                for batch, (X_val, y_val) in enumerate(val_loader):
-                    mean_test, var_val = model(X_val.unsqueeze(1).expand(-1, ensemble_size, -1))
-                    test_loss += loss_fn(mean_test, y_val.unsqueeze(1).expand(-1, ensemble_size, -1), var_val).item()
-                average_test_loss = test_loss / (batch + 1)
-                if best_loss is None or average_test_loss < best_loss:
-                    # Update model's best performance
-                    best_loss= average_test_loss
-                    # Save the model's weights w/ best performance
-                    best_model = copy.deepcopy(model.state_dict())
-
-        end_time_training = time.time()
-    # Calculate training time
-    training_time = end_time_training-start_time_training 
-    # Update model with the weights with the best performance
-    model = model.load_state_dict(best_model)
-
-    return model, training_time
 
 
-def prepare_datasets(test_size:float=0.1, val_size:float=0.2, batch_size:int=128):
-    """
-    Prepare PyTorch DataLoader instances for power and concrete datasets.
 
-    Parameters:
-    - test_size (float): Proportion of the dataset to include in the test split.
-    - val_size (float): Proportion of the training dataset to include in the validation split.
-    - batch_size (int): Number of samples per batch to load into DataLoader.
-
-    Returns:
-    - power_train_loader, power_val_loader, power_test_loader,
-      concrete_train_loader, concrete_val_loader, concrete_test_loader:
-      DataLoader instances for training, validation, and test sets for both power and concrete datasets.
-    """
-    # Read data into a pandas dataframe
-    power = pd.read_excel('..\\data\\UCI_Regression\\5.PowerPlant\\Folds5x2_pp.xlsx')
-    concrete = pd.read_excel('.\\data\\UCI_Regression\\2.Concrete\\Concrete_Data.xls')
-
-    # Perform first split, training and test set
-    power_train, power_test = train_test_split(power, test_size=test_size)
-    power_train, power_test = power_train.to_numpy(), power_test.to_numpy()
-    concrete_train, concrete_test = train_test_split(concrete, test_size=test_size)
-    concrete_train, concrete_test = concrete_train.to_numpy(), concrete_test.to_numpy()
-
-    # Split the training datasets into features and labels
-    X_power_train = power_train[:, :4]
-    Y_power_train = power_train[:, 4]
-    X_concrete_train = concrete_train[:, :8]
-    Y_concrete_train = concrete_train[:, 8]
-
-    X_power_test = power_test[:, :4]
-    Y_power_test = power_test[:, 4]
-    X_concrete_test = concrete_test[:, :8]
-    Y_concrete_test = concrete_test[:, 8]
-
-    # Split the training dataset into a training and validation datset
-    x_power_train, x_power_val, y_power_train, y_power_val = train_test_split(X_power_train, Y_power_train, test_size=val_size)
-    x_concrete_train, x_conrete_val, y_concrete_train, y_concrete_val = train_test_split(X_concrete_train, Y_concrete_train, test_size=val_size)
-
-    # Normalise data by subtracting mean and divide by standard deviation
-    standard_scaler = StandardScaler()
-    x_power_train = standard_scaler.fit_transform(x_power_train)
-    x_power_val = standard_scaler.fit_transform(x_power_val)
-    X_power_test = standard_scaler.fit_transform(X_power_test)
-
-    x_concrete_train = standard_scaler.fit_transform(x_concrete_train)
-    x_concrete_val = standard_scaler.fit_transform(x_concrete_val)
-    X_conrete_test = standard_scaler.fit_transform(X_concrete_test)
-
-    # Convert numpy arrays to PyTorch Tensors
-    x_power_train_tensor = torch.tensor(x_power_train, dtype=torch.float32).to(device)
-    y_power_train_tensor = torch.tensor(y_power_train, dtype=torch.float32).unsqueeze(1).to(device)
-    x_power_val_tensor = torch.tensor(x_power_val, dtype=torch.float32).to(device)
-    y_power_val_tensor = torch.tensor(y_power_val, dtype=torch.float32).unsqueeze(1).to(device)
-    x_power_test_tensor = torch.tensor(X_power_test, dtype=torch.float32).to(device)
-    y_power_test_tensor = torch.tensor(Y_power_test, dtype=torch.float32).unsqueeze(1).to(device)
-
-    x_concrete_train_tensor = torch.tensor(x_concrete_train, dtype=torch.float32).to(device)
-    y_concrete_train_tensor = torch.tensor(y_concrete_train, dtype=torch.float32).unsqueeze(1).to(device)
-    x_concrete_val_tensor = torch.tensor(x_concrete_val, dtype=torch.float32).to(device)
-    y_concrete_val_tensor = torch.tensor(y_concrete_val, dtype=torch.float32).unsqueeze(1).to(device)
-    x_concrete_test_tensor = torch.tensor(X_concrete_test, dtype=torch.float32).to(device)
-    y_concrete_test_tensor = torch.tensor(Y_concrete_test, dtype=torch.float32).unsqueeze(1).to(device)
-
-    # Create TensorDatasets for power dataset
-    power_train_dataset = TensorDataset(x_power_train_tensor, y_power_train_tensor)
-    power_val_dataset = TensorDataset(x_power_val_tensor, y_power_val_tensor)
-    power_test_dataset = TensorDataset(x_power_test_tensor, y_power_test_tensor)
-
-    # Create TensorDatasets for concrete dataset
-    concrete_train_dataset = TensorDataset(x_concrete_train_tensor, y_concrete_train_tensor)
-    concrete_val_dataset = TensorDataset(x_concrete_val_tensor, y_concrete_val_tensor)
-    concrete_test_dataset = TensorDataset(x_concrete_test_tensor, y_concrete_test_tensor)
-
-
-    # Create DataLoaders for power dataset
-    power_train_loader = DataLoader(dataset=power_train_dataset, batch_size=batch_size, shuffle=True)
-    power_val_loader = DataLoader(dataset=power_val_dataset, batch_size=batch_size, shuffle=False)
-    power_test_loader = DataLoader(dataset=power_test_dataset, batch_size=batch_size, shuffle=False)
-
-    # Create DataLoaders for concrete dataset
-    concrete_train_loader = DataLoader(dataset=concrete_train_dataset, batch_size=batch_size, shuffle=True)
-    concrete_val_loader = DataLoader(dataset=concrete_val_dataset, batch_size=batch_size, shuffle=False)
-    concrete_test_loader = DataLoader(dataset=concrete_test_dataset, batch_size=batch_size, shuffle=False)
-
-    return power_train_loader, power_val_loader, power_test_loader, concrete_train_loader, concrete_val_loader, concrete_test_loader
