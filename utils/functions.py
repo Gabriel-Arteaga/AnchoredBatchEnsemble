@@ -381,7 +381,10 @@ def train_models_w_mean_var(
     # Initiate variable which stores test timer
     test_time = 0
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
-        optimizer = optimizer(model.parameters(), lr=learning_rate)
+        if weight_decay == None:
+            optimizer = optimizer(model.parameters(),lr=learning_rate)
+        else:
+            optimizer = optimizer(model.parameters(),lr=learning_rate, weight_decay=weight_decay)
         model.to(device)
 
         for epoch in range(epochs):
@@ -645,7 +648,9 @@ def train_and_save_results(
                     # Shall implement for Naive model
                     model = None
                 # Train the model and get the average loss on test data
-                GNLLL_result, rmse_result, ENCE_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, ensemble_ence, train_time = train_models_w_mean_var(
+                comment = f'model={model_name} hidden_units={hidden_units} hidden_layers={hidden_layers} weight_decay={weight_decay} epochs={epochs} ens.size={ensemble_size} dropout_prob={dropout_prob}'
+                writer = SummaryWriter(comment=comment)
+                GNLLL_result, rmse_result, epoch, ensemble_GNLLL_result, ensemble_rmse_result, train_time, PICP, MPIW = train_models_w_mean_var(
                     model=model,
                     ensemble_type=model_name,
                     ensemble_size=ensemble_size,
@@ -659,11 +664,17 @@ def train_and_save_results(
                     test=test,
                     early_stopping=early_stopping,
                     RMSE=RMSE,
+                    calibration_metrics=True,
                     patience=patience,
                     learning_rate=learning_rate,
                     weight_decay=weight_decay,
+                    writer=writer,
                     device=device
                 )
+                writer.add_hparams({'weight_decay': weight_decay, 'h_units': hidden_units, 'h_layers': hidden_layers, 'epochs':epochs, 'ensemble_size':ensemble_size,'dropout_prob': dropout_prob}, 
+                                    {'GNLLLoss':GNLLL_result, 'Ens.GNLLLoss': ensemble_GNLLL_result, 'RMSE': rmse_result, 'Ens.RMSE': ensemble_rmse_result, 
+                                    'PICP': PICP, 'MPIW': MPIW})
+                writer.close()
                 # Save result in a dict
                 results = {
                     'model': model_name,
@@ -676,8 +687,8 @@ def train_and_save_results(
                     'optimizer': 'Adam',
                     'loss_fn': loss_fn.__class__.__name__,
                     'learning_rate': learning_rate,
-                    'ENCE': ENCE_result,
-                    'ensemble_ENCE': ensemble_ence,
+                    'MPIW': MPIW,
+                    'PICP': PICP,
                     'GNLLL': GNLLL_result,
                     'ensemble_GNLLL': ensemble_GNLLL_result,
                     'RMSE': rmse_result,
