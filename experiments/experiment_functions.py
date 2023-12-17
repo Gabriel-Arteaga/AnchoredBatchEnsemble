@@ -30,7 +30,7 @@ def prepare_datasets(test_size:float=0.1, val_size:float=0.2, batch_size:int=128
     """
     # Read data into a pandas dataframe
     power = pd.read_excel('..\\data\\UCI_Regression\\5.PowerPlant\\Folds5x2_pp.xlsx')
-    concrete = pd.read_excel('.\\data\\UCI_Regression\\2.Concrete\\Concrete_Data.xls')
+    concrete = pd.read_excel('..\\data\\UCI_Regression\\2.Concrete\\Concrete_Data.xls')
 
     # Perform first split, training and test set
     power_train, power_test = train_test_split(power, test_size=test_size)
@@ -51,7 +51,7 @@ def prepare_datasets(test_size:float=0.1, val_size:float=0.2, batch_size:int=128
 
     # Split the training dataset into a training and validation datset
     x_power_train, x_power_val, y_power_train, y_power_val = train_test_split(X_power_train, Y_power_train, test_size=val_size)
-    x_concrete_train, x_conrete_val, y_concrete_train, y_concrete_val = train_test_split(X_concrete_train, Y_concrete_train, test_size=val_size)
+    x_concrete_train, x_concrete_val, y_concrete_train, y_concrete_val = train_test_split(X_concrete_train, Y_concrete_train, test_size=val_size)
 
     # Normalise data by subtracting mean and divide by standard deviation
     standard_scaler = StandardScaler()
@@ -61,7 +61,7 @@ def prepare_datasets(test_size:float=0.1, val_size:float=0.2, batch_size:int=128
 
     x_concrete_train = standard_scaler.fit_transform(x_concrete_train)
     x_concrete_val = standard_scaler.fit_transform(x_concrete_val)
-    X_conrete_test = standard_scaler.fit_transform(X_concrete_test)
+    X_concrete_test = standard_scaler.fit_transform(X_concrete_test)
 
     # Convert numpy arrays to PyTorch Tensors
     x_power_train_tensor = torch.tensor(x_power_train, dtype=torch.float32).to(device)
@@ -99,7 +99,40 @@ def prepare_datasets(test_size:float=0.1, val_size:float=0.2, batch_size:int=128
     concrete_val_loader = DataLoader(dataset=concrete_val_dataset, batch_size=batch_size, shuffle=False)
     concrete_test_loader = DataLoader(dataset=concrete_test_dataset, batch_size=batch_size, shuffle=False)
 
-    return power_train_loader, power_val_loader, power_test_loader, concrete_train_loader, concrete_val_loader, concrete_test_loader
+    # Standardize for GP concrete
+    xTrain_mean = X_concrete_train.mean(axis = 0) # mean for each feature
+    xTrain_std = X_concrete_train.std(axis = 0) # std for each feature
+    xTrain_concrete = (X_concrete_train-xTrain_mean) / xTrain_std # Standardize
+    # Standardize test input points
+    xTest_mean = X_concrete_test.mean(axis = 0) # mean for each feature
+    xTest_std = X_concrete_test.std(axis = 0) # std for each feature
+    xTest_concrete = (X_concrete_test-xTest_mean) / xTest_std # Standardize
+
+    # Convert them to tensors
+    x_train_concrete_GP = torch.from_numpy(xTrain_concrete).float().to(device)
+    x_test_concrete_GP = torch.from_numpy(xTest_concrete).float().to(device)
+    y_train_concrete_GP = torch.from_numpy(Y_concrete_train).float().to(device)
+    y_test_concrete_GP = torch.from_numpy(Y_concrete_test).float().to(device)
+
+
+    # Standardize for GP power datasets
+    # Standardize training input points
+    xTrain_mean = X_power_train.mean(axis = 0) 
+    xTrain_std = X_power_train.std(axis = 0) 
+    xTrain_power = (X_power_train-xTrain_mean) / xTrain_std 
+    # Standardize test input points
+    xTest_mean = X_power_test.mean(axis = 0)
+    xTest_std = X_power_test.std(axis = 0) 
+    xTest_power = (X_power_test-xTest_mean) / xTest_std 
+    # Convert them to tensors
+    x_train_power_GP = torch.from_numpy(xTrain_power).float().to(device)
+    x_test_power_GP = torch.from_numpy(xTest_power).float().to(device)
+    y_train_power_GP  = torch.from_numpy(Y_power_train).float().to(device)
+    y_test_power_GP = torch.from_numpy(Y_power_test).float().to(device)
+
+    return power_train_loader, power_val_loader, power_test_loader, concrete_train_loader, concrete_val_loader, concrete_test_loader,\
+        x_train_power_GP, y_train_power_GP, x_test_power_GP, y_test_power_GP, x_train_concrete_GP, y_train_concrete_GP, x_test_concrete_GP, y_test_concrete_GP
+
 
 def train_ensemble_model(
     model: torch.nn.Module,
@@ -109,12 +142,12 @@ def train_ensemble_model(
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     train_loader: torch.utils.data.DataLoader,
-    val_loader: Optional[torch.utils.data.DataLoader],
-    data_noise: Optional[float],
-    input_shape: Optional[int],
-    h_layers: Optional[int],
-    h_units: Optional[int],
-    weight_decay: Optional[float],
+    val_loader: Optional[torch.utils.data.DataLoader] = None,
+    data_noise: Optional[float] = None,
+    input_shape: Optional[int] = None,
+    h_layers: Optional[int] = None,
+    h_units: Optional[int] = None,
+    weight_decay: Optional[float] = None,
     learning_rate: Optional[float]=0.001   
 ):
     """
@@ -127,7 +160,10 @@ def train_ensemble_model(
     if ensemble_type == 'batch' or ensemble_type == 'anchored_batch':
          # Initiate a variable to track best model performance
         best_loss = None
-        optimizer = optimizer(model.parameters(), lr=learning_rate)
+        if ensemble_type == 'anchored':
+            optimizer = optimizer(model.parameters(), lr=learning_rate)
+        else: 
+            optimizer = optimizer(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         model.to(device)
         for epoch in range(epochs):
             # Training
@@ -173,7 +209,8 @@ def train_ensemble_model(
                     best_model = copy.deepcopy(model.state_dict())
 
         # Update model with the weights with the best performance
-        final_model = model.load_state_dict(best_model)
+        model.load_state_dict(best_model)
+        final_model = model
 
     elif ensemble_type == 'naive':
         # Initialize NNs and store them in a list
@@ -187,7 +224,7 @@ def train_ensemble_model(
             # Initialize best loss as None for each model
             best_loss = None
             # We're optimizing each model's parameters
-            model_optimizer = optimizer(model.parameters(), lr= learning_rate)
+            model_optimizer = optimizer(model.parameters(), lr= learning_rate, weight_decay=weight_decay)
             model.to(device)
 
             # Conduct training
@@ -202,13 +239,13 @@ def train_ensemble_model(
                     loss = loss_fn(mean_pred, y, var_pred) 
 
                     # 3. Optimizer zero grad
-                    optimizer.zero_grad() # Set the optimizer's gradients to zero
+                    model_optimizer.zero_grad() # Set the optimizer's gradients to zero
 
                     # 4. Loss backward
                     loss.backward()
 
                     #5. Optimizer step
-                    optimizer.step()
+                    model_optimizer.step()
                 
                 # Test model on validation data
                 test_loss = 0
@@ -230,7 +267,7 @@ def train_ensemble_model(
                         best_model = copy.deepcopy(model.state_dict())
             
             # Keep the best performing model weights
-            model = model.load_state_dict(best_model)
+            model.load_state_dict(best_model)
         # Once we have trained all ensemble members we have a final ensemble model
         final_model = NaiveEnsemble
     end_time_training = time.time()
@@ -240,13 +277,24 @@ def train_ensemble_model(
     return final_model, training_time
 
 
-def test_model(model,
-               model_name,
-               test_loader,
-               ensemble_size: Optional[int],
-               batch_size: Optional[int],
-               test_time_iterations: Optional[int] = 10):
-    model.eval()
+def test_model(model: torch.nn.Module,
+               model_name: str,
+               test_loader: torch.utils.data.DataLoader,
+               ensemble_size: int) -> Tuple[float, float, float]:
+    """
+    Evaluate the performance of an ensemble model on a test dataset and compute relevant metrics.
+
+    Parameters:
+    - model (nn.Module): The ensemble model to be evaluated.
+    - model_name (str): The type of ensemble model ('anchored_batch', 'batch', 'naive').
+    - test_loader (DataLoader): DataLoader for the test dataset.
+    - ensemble_size (int): Number of ensemble members. Required for 'anchored_batch' and 'batch' models.
+
+    Returns:
+    - average_rmse_loss (float): Average Root Mean Squared Error (RMSE) across batches.
+    - PICP (float): Prediction Interval Coverage Probability (PICP).
+    - MPIW (float): Mean Prediction Interval Width (MPIW).
+    """
     test_loss = 0
     # Initialize variables for calculating PICP and MPIW
     n = 0
@@ -256,10 +304,11 @@ def test_model(model,
     MSE_loss_fn = nn.MSELoss()
 
     if model_name == 'anchored_batch' or model_name == 'batch':
+        model.eval()
         with torch.no_grad():
             for batch, (X_test, y_test) in enumerate(test_loader):
                 mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
-                
+
                 # Calculate combined ensemble's loss
                 aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
                 ensemble_mean = torch.mean(mean_test, dim=1)
@@ -273,11 +322,12 @@ def test_model(model,
         with torch.no_grad():
             for batch, (X_test, y_test) in enumerate(test_loader):
                 # Initialize tensors which will collect mean and variance predictions/batch from all ensemble members
-                ensemble_mean, ensemble_var = torch.zeros((batch_size,ensemble_size,1)), torch.zeros((batch_size,ensemble_size,1))
-                for ensemble_member, index in zip(model, len(model)):
+                ensemble_mean, ensemble_var = torch.zeros((X_test.shape[0],ensemble_size,1)).to(device), torch.zeros((X_test.shape[0],ensemble_size,1)).to(device)
+                for ensemble_member, index in zip(model, range(len(model))):
+                    ensemble_member.eval()
                     member_mean, member_var = ensemble_member(X_test)
                     # Gather each ensemble member's prediction
-                    ensemble_mean[:,ensemble_size,:], ensemble_var[:,ensemble_size,:] = member_mean, member_var
+                    ensemble_mean[:,index,:], ensemble_var[:,index,:] = member_mean, member_var
                 
                 # Calculate combined ensemble's mean & variance (combined uncertainty considered variance)
                 aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(ensemble_mean,ensemble_var,ensemble_size)
@@ -296,3 +346,50 @@ def test_model(model,
     MPIW = piw/n
     return average_rmse_loss, PICP, MPIW
             
+def test_inference_time(model: torch.nn.Module,
+                        model_name: str,
+                        test_loader: torch.utils.data.DataLoader,
+                        ensemble_size: int,
+                        n_iterations: int) -> list[float]:
+    """
+    Measure the inference time for making predictions using an ensemble model.
+
+    Parameters:
+    - model (torch.nn.Module): The ensemble model for which inference time is to be measured.
+    - model_name (str): The type of ensemble model ('anchored_batch', 'batch', 'naive').
+    - test_loader (torch.utils.data.DataLoader): DataLoader for the test dataset.
+    - ensemble_size (int): Number of ensemble members.
+    - n_iterations (int): Number of iterations to measure inference time.
+
+    Returns:
+    - inference_times (List[float]): List of inference times for each iteration.
+    """
+    inference_times = []
+    # Conduct predictions and gather them in a list
+    for _ in range(n_iterations):
+        test_time_start = time.time()
+        if model_name == 'anchored_batch' or model_name == 'batch':
+            with torch.no_grad():
+                for batch, (X_test, y_test) in enumerate(test_loader):
+                    mean_test, var_test = model(X_test.unsqueeze(1).expand(-1, ensemble_size, -1))
+                    # Calculate combined ensemble's predictions
+                    aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(mean_test,var_test,ensemble_size)
+                    ensemble_mean = torch.mean(mean_test, dim=1)
+
+        elif model_name == 'naive':
+            with torch.no_grad():
+                for batch, (X_test, y_test) in enumerate(test_loader):
+                    # Initialize tensors which will collect mean and variance predictions/batch from all ensemble members
+                    ensemble_mean, ensemble_var = torch.zeros((X_test.shape[0],ensemble_size,1)), torch.zeros((X_test.shape[0],ensemble_size,1))
+                    for ensemble_member, index in zip(model, range(len(model))):
+                        member_mean, member_var = ensemble_member(X_test)
+                        # Gather each ensemble member's prediction
+                        ensemble_mean[:,index,:], ensemble_var[:,index,:] = member_mean, member_var
+                    
+                    # Calculate combined ensemble's mean & variance (combined uncertainty considered variance)
+                    aleatoric_uncertainty, epistemic_uncertainty, combined_uncertainty = calculate_uncertainties(ensemble_mean,ensemble_var,ensemble_size)
+                    ensemble_mean = torch.mean(ensemble_mean, dim=1)
+        
+        test_time_end = time.time()
+        inference_times.append(test_time_end-test_time_start)
+    return inference_times
