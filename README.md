@@ -38,7 +38,7 @@ The left term corresponds to the Gaussian Negative Log-Likelihood Loss (GNLLL), 
 
 We leveraged *BatchEnsemble* as a memory efficient way to add ensemble members to an ensemble. This is achieved by defining a weight matrix as the Hardmard product of one shared weight matrix shared among ensemble members and a rank-one matrix per ensemble member: 
 $$\bar{W}_i = W \odot F_i, \text{where }F_i=r_is_i^T$$
-We assesed our proposed method with the incorporated BatchEnsemble against a Naive ensemble which needs to be trained sequentially, the differnece in training time is huge as the number of ensemble members increases, as can be seen in the following plot:
+We assessed our proposed method, incorporating BatchEnsemble, against a Naive ensemble that requires sequential training. The difference in training time becomes substantial as the number of ensemble members increases, as illustrated in the following plot.
 <p align="center">
   <img src="/data/readme_pics/training_time.png" width="49%" height="400" alt="Naive ensemble method" />
 </p>
