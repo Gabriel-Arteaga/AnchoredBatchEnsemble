@@ -5,7 +5,9 @@ Additionally, it features a hybrid implementation combining BatchEnsemble with t
 ## Table Of Contents
  * [Ensemble Background](#Ensemble-Background)
  * [Why BatchEnsemble and Anchored Regularization?](#BatchEnsemble-and-Anchored-Regularization)
-
+ * [Experiments](#Experiments)
+ * [Usage](#Usage)
+ * [Acknowledgements](#Acknowledgements)
 ## Background
 Deep Neural Network (DNNs) are powerful predictors, however, it is not seldom that they produce wrong predictions overconfidently.
 Several solutions have been proposed to counteract this behavior, quantifying the uncertainty is one important step. 
@@ -31,7 +33,7 @@ The left term corresponds to the Gaussian Negative Log-Likelihood Loss (GNLLL), 
   <img src="/data/readme_pics/anchored_wiggle.png" width="49%" height="400" alt="Our proposed method" /> 
 </p>
 <p>
-  <em> &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; Naive Ensemble Method &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; Our proposed method.</em>
+  <em> &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; Naive Ensemble Method &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; Our proposed method.</em>
 </p>
 
 
@@ -46,3 +48,37 @@ We assessed our proposed method, incorporating BatchEnsemble, against a Naive en
 <em> Training time for different ensemble sizes for our proposed ensemble and the Naive ensemble </em>
 </p>
 
+
+## Experiments
+In our project, we conducted benchmark experiments using five different models on two UCI regression datasets. Three of these models were neural network ensembles: our proposed method, **'Anchored Batch'**, the BatchEnsemble model by Wen et al. named **'Batch'**, and a **'Naive'** ensemble where each ensemble was trained sequentially. It's important to note that all ensemble models shared the same architecture hyperparameters and loss functions. The only distinction between 'Batch' and 'Naive' was the scalability improvements, while 'AnchoredBatch' additionally employed anchored regularization. In addition to the neural network ensembles, we benchmarked two types of Gaussian Processes—one with all data points (**'GP'**) and another utilizing an inducing point strategy containing half the number of points (**'GP Induce'**).  
+Below you case see our results on the [Power](https://archive.ics.uci.edu/dataset/294/combined+cycle+power+plant) dataset:
+
+| **Metric** | **Anchored Batch** | **Batch** | **Naive** | **GP** | **GP Induce** |
+|:----------:|:------------------:|:---------:|:---------:|:------:|:-------------:|
+| RMSE ↑     | **4.24**           | 4.27      | 4.86      | 5.11   | 5.80          |
+| PICP ↑     | **0.96**               | 0.99  | 1.00      | 0.76   | 0.69          |
+| MPIW ↓     | **17.05**          | 22.09     | 48.77     | 12.20  | 11.91         |
+| Train Time (s) ↓ | 456.06      | 333.64    | 1755.97 | 87.55  | **52.92**         |
+| Inference Time (s) ↓ | **0.02**    | **0.02**      | 0.04      | 0.31   | 0.10      |  
+
+Note that we employed $2\sigma$ prediction intervals, equivalent to a 95% prediction interval. Our objective in generating high-quality prediction intervals was to minimize the Mean Prediction Interval Width (MPIW) while ensuring a Prediction Interval Coverage Probability (PICP) of 95%. With this in mind we can see that **'Anchored Batch'** produced better results in all categories, except in training time. However, note that **'Anchored Batch'** outperformed the **'Naive'** model substantially in terms of train time.  
+The second dataset we utilized was the [Concrete](https://archive.ics.uci.edu/dataset/165/concrete+compressive+strength) dataset:
+| Metric | Anchored Batch | Batch | Naive | GP | GP Induce |
+|--------|----------------|-------|-------|----|-----------|
+| RMSE ↑ | 6.98           | 6.85  | **5.59**  | 7.45 | 7.92      |
+| PICP ↑ | 0.92           | 0.91  | **0.98**  | 0.73 | 0.60      |
+| MPIW ↓ | 24.26          | 23.39 | **26.40** | 15.17 | 14.90     |
+| Train Time (s) ↓ | 75.59 | 50.99 | 496.42 | 24.49 | **5.01**   |
+| Inference Time (s) ↓ | 0.003 | **0.002** | 0.147 | 0.008 | 0.004 |
+
+This result was somewhat disappointing as the **'Naive'** model outperformed the other models in all metrics except for train time and inference time. We attribute this outcome, in part, to the fact that the experiments were only run once; with more iterations, the average might yield a different result. It's crucial to emphasize that all ensembles used the same loss function and architecture, with the naive model differing only in terms of the regularization term from the **'Anchored Batch'**. Nevertheless, further investigation into the behavior of this result will be deferred to future work.  
+These experiments were produced by running the `experiments.py` file.
+
+
+
+
+## Usage
+Run the `usage_example.ipynb` notebook to get an overview of using the BatchLinear layer and creating a BatchEnsemble in PyTorch. Additionally, explore the initialization and training process for the proposed method, AnchoredBatchEnsemble.
+## Acknowledgements
+First and foremost, I would like to thank my supervisor [Nicolas Pielawski](https://github.com/npielawski) , for inviting me to participate in this project, introducing me to the intricacies of uncertainty in machine learning, and providing valuable guidance throughout the project.  
+Additionally, I would like to express my appreciation to my project group member, [Alexander Sabelström](https://github.com/Sabelz). He dedicated his efforts to the Gaussian Processes aspect of the experiments, and you can find his contributions in the following [repository](https://github.com/Sabelz/Gaussian_Processes_Inducing_Points).
